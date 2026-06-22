@@ -254,7 +254,7 @@ export async function POST(req: NextRequest) {
       };
       
       db.audit_logs.push(auditLog);
-      writeDatabase(db);
+      await writeDatabase(db);
       
       return NextResponse.json({ success: true, baggage_item: bag });
     }
@@ -292,7 +292,7 @@ export async function POST(req: NextRequest) {
       };
       
       db.audit_logs.push(auditLog);
-      writeDatabase(db);
+      await writeDatabase(db);
       
       return NextResponse.json({ success: true, message: 'Baggage item historically saved with deletion code logged.' });
     }
@@ -326,7 +326,7 @@ export async function POST(req: NextRequest) {
       };
       
       db.audit_logs.push(auditLog);
-      writeDatabase(db);
+      await writeDatabase(db);
       
       return NextResponse.json({ success: true, message: 'Baggage item was permanently purged from the database.' });
     }
@@ -350,7 +350,7 @@ export async function POST(req: NextRequest) {
         qr_code_hash: `hash-${name.trim().toLowerCase().replace(/[^a-z0-9]/g, '-')}`
       };
       db.locations.push(newLoc);
-      writeDatabase(db);
+      await writeDatabase(db);
       
       return NextResponse.json({ success: true, location: newLoc });
     }
@@ -363,7 +363,7 @@ export async function POST(req: NextRequest) {
       }
       
       db.locations.splice(index, 1);
-      writeDatabase(db);
+      await writeDatabase(db);
       
       return NextResponse.json({ success: true });
     }
@@ -384,7 +384,7 @@ export async function POST(req: NextRequest) {
         agent_name: name.trim()
       };
       db.delivery_agents.push(newAgent);
-      writeDatabase(db);
+      await writeDatabase(db);
       
       return NextResponse.json({ success: true, agent: newAgent });
     }
@@ -397,7 +397,7 @@ export async function POST(req: NextRequest) {
       }
       
       db.delivery_agents.splice(index, 1);
-      writeDatabase(db);
+      await writeDatabase(db);
       
       return NextResponse.json({ success: true });
     }
@@ -408,8 +408,17 @@ export async function POST(req: NextRequest) {
       let finalExpectedTags: string[] = [];
       let finalRows: ManifestRow[] = [];
       
+      const existingTags = new Set<string>();
+      db.manifests.forEach(m => {
+        if (m.expected_tags) {
+          m.expected_tags.forEach(t => existingTags.add(t));
+        }
+      });
+      const currentUploadTags = new Set<string>();
+      let duplicatesFound = 0;
+      
       if (rows && Array.isArray(rows)) {
-        finalRows = rows.map((r, i) => ({
+        const tempRows = rows.map((r, i) => ({
           id: r.id || `row-${Date.now()}-${i}`,
           pir: r.pir || '',
           passenger_name: r.passenger_name || r.name || '',
@@ -421,54 +430,89 @@ export async function POST(req: NextRequest) {
           remarks: r.remarks || ''
         }));
         
-        finalRows.forEach(row => {
-          if (row.original_tag) {
+        tempRows.forEach(row => {
+          let hasDuplicate = false;
+          let rTags: string[] = [];
+          
+          if (row.original_tag && row.original_tag.trim() !== '' && !['N/A', 'NONE', '-'].includes(row.original_tag.trim().toUpperCase())) {
             const p = parseBagTag(row.original_tag);
-            finalExpectedTags.push(p ? p.universalTag : row.original_tag);
+            rTags.push(p ? p.universalTag : row.original_tag.replace(/[^a-zA-Z0-9]/g, '').toUpperCase());
           }
-          if (row.rush_tag) {
+          if (row.rush_tag && row.rush_tag.trim() !== '' && !['N/A', 'NONE', '-'].includes(row.rush_tag.trim().toUpperCase())) {
             const p = parseBagTag(row.rush_tag);
-            finalExpectedTags.push(p ? p.universalTag : row.rush_tag);
+            rTags.push(p ? p.universalTag : row.rush_tag.replace(/[^a-zA-Z0-9]/g, '').toUpperCase());
+          }
+          
+          rTags.forEach(tag => {
+            if (existingTags.has(tag) || currentUploadTags.has(tag)) {
+              hasDuplicate = true;
+            }
+          });
+          
+          if (hasDuplicate) {
+            duplicatesFound++;
+          } else {
+            rTags.forEach(tag => {
+               currentUploadTags.add(tag);
+               finalExpectedTags.push(tag);
+            });
+            finalRows.push(row);
           }
         });
       } else if (tags && Array.isArray(tags)) {
         // Fallback or simple copy-paste standard parsing
-        finalRows = tags.map((t, i) => {
+        tags.forEach((t, i) => {
+          if (!t || t.trim() === '' || ['N/A', 'NONE', '-'].includes(t.trim().toUpperCase())) return;
           const p = parseBagTag(t);
-          if (p) finalExpectedTags.push(p.universalTag);
-          return {
-            id: `row-${Date.now()}-${i}`,
-            pir: `PIR-GEN-${10000 + i}`,
-            passenger_name: `Passenger ${i + 1}`,
-            original_tag: t,
-            rush_tag: '',
-            flight_no: flightNumber || 'GENERIC',
-            seal_no: `S-${100 + i}`,
-            destination: 'ORD',
-            remarks: 'Imported via simple tag list'
-          };
+          const uTag = p ? p.universalTag : t.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+          if (existingTags.has(uTag) || currentUploadTags.has(uTag)) {
+            duplicatesFound++;
+          } else {
+            currentUploadTags.add(uTag);
+            finalExpectedTags.push(uTag);
+            finalRows.push({
+              id: `row-${Date.now()}-${i}`,
+              pir: `PIR-GEN-${10000 + i}`,
+              passenger_name: `Passenger ${i + 1}`,
+              original_tag: t,
+              rush_tag: '',
+              flight_no: flightNumber || 'GENERIC',
+              seal_no: `S-${100 + i}`,
+              destination: 'ORD',
+              remarks: 'Imported via simple tag list'
+            });
+          }
         });
       } else {
         return NextResponse.json({ success: false, error: 'Flight identifier and tag rows are required for flight manifest validation' }, { status: 400 });
       }
       
       if (finalExpectedTags.length === 0) {
-        return NextResponse.json({ success: false, error: 'The uploaded file does not contain any readable airline baggage tags.' }, { status: 400 });
+        return NextResponse.json({ success: false, error: `The uploaded file does not contain any readable airline baggage tags. ${duplicatesFound > 0 ? (duplicatesFound + ' duplicate records were rejected.') : ''}` }, { status: 400 });
       }
       
       const newManifest: ManifestItem = {
         id: 'mnf-' + Date.now(),
         flight_number: flightNumber.trim().toUpperCase(),
-        expected_tags: [...new Set(finalExpectedTags)],
+        expected_tags: finalExpectedTags,
         upload_timestamp: new Date().toISOString(),
         airline_code: flightNumber.trim().slice(0, 2).toUpperCase(),
         rows: finalRows
       };
       
-      db.manifests.push(newManifest);
-      writeDatabase(db);
+      const totalRecords = rows ? rows.length : (tags ? tags.length : 0);
+      const uploadedRecords = finalRows.length;
       
-      return NextResponse.json({ success: true, manifest: newManifest });
+      db.manifests.push(newManifest);
+      await writeDatabase(db);
+      
+      return NextResponse.json({ 
+        success: true, 
+        manifest: newManifest, 
+        totalRecords, 
+        uploadedRecords,
+        duplicatesRejected: duplicatesFound 
+      });
     }
 
     if (action === 'update_manifest_row') {
@@ -532,7 +576,7 @@ export async function POST(req: NextRequest) {
       });
       m.expected_tags = [...new Set(newExpectedTags)];
       
-      writeDatabase(db);
+      await writeDatabase(db);
       return NextResponse.json({ success: true, manifest: m });
     }
 
@@ -579,7 +623,7 @@ export async function POST(req: NextRequest) {
       }
       
       if (updated) {
-        writeDatabase(db);
+        await writeDatabase(db);
         return NextResponse.json({ success: true });
       }
       
@@ -725,7 +769,7 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      writeDatabase(db);
+      await writeDatabase(db);
       return NextResponse.json({ success: true, results });
     }
 
@@ -735,7 +779,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: false, error: 'Flight list is required' }, { status: 400 });
       }
       db.allowed_flights = flights.map(f => f.trim()).filter(f => f.length > 0);
-      writeDatabase(db);
+      await writeDatabase(db);
       return NextResponse.json({ success: true, flights: db.allowed_flights });
     }
 

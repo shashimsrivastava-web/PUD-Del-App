@@ -927,7 +927,18 @@ export default function Home() {
 
       const json = await response.json();
       if (json.success) {
-        triggerNotification('success', `High-fidelity manifest for ${manifestFlightInput} with ${json.manifest.expected_tags.length} expected bags compiled successfully.`);
+        let msg = '';
+        const { totalRecords, uploadedRecords, duplicatesRejected } = json;
+        
+        if (duplicatesRejected === 0) {
+          msg = `${uploadedRecords} records uploaded successfully for flight ${manifestFlightInput}.`;
+        } else if (uploadedRecords === 0) {
+          msg = `All ${totalRecords} records were duplicates; none were uploaded for flight ${manifestFlightInput}.`;
+        } else {
+          msg = `Of ${totalRecords} records, ${duplicatesRejected} were duplicate which are ignored and remaining ${uploadedRecords} uploaded for flight ${manifestFlightInput}.`;
+        }
+        
+        triggerNotification('success', msg);
         setManifestFlightInput('');
         setRawManifestPaste('');
         setParsedManifestRows(null);
@@ -1500,7 +1511,7 @@ export default function Home() {
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
-            className="bg-red-50 border-b border-red-200 text-red-800 px-4 py-3.5 text-center text-sm font-semibold flex items-center justify-center gap-2 shadow-xs"
+            className="fixed top-0 w-full z-[100] bg-red-50 border-b border-red-200 text-red-800 px-4 py-3.5 text-center text-sm font-semibold flex items-center justify-center gap-2 shadow-xs"
           >
             <AlertTriangle className="h-4 w-4 text-red-600 shrink-0" />
             <span>{apiError}</span>
@@ -1511,7 +1522,7 @@ export default function Home() {
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
-            className="bg-emerald-50 border-b border-emerald-200 text-emerald-800 px-4 py-3.5 text-center text-sm font-semibold flex items-center justify-center gap-2 shadow-xs"
+            className="fixed top-0 w-full z-[100] bg-emerald-50 border-b border-emerald-200 text-emerald-800 px-4 py-3.5 text-center text-sm font-semibold flex items-center justify-center gap-2 shadow-xs"
           >
             <CheckCircle className="h-4 w-4 text-emerald-600 shrink-0" />
             <span>{apiSuccess}</span>
