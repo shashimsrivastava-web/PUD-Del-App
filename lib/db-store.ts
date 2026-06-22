@@ -1,5 +1,5 @@
-import fs from 'fs';
-import path from 'path';
+import { db as firestoreDb } from './firebase';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 export interface BaggageItem {
   id: string;
@@ -79,8 +79,6 @@ export interface DatabaseState {
   delivery_agents: DeliveryAgentItem[];
   allowed_flights: string[];
 }
-
-const DB_FILE = path.join(process.cwd(), 'data', 'db.json');
 
 const DEFAULT_LOCATIONS: LocationItem[] = [
   { id: 'loc-1', location_name: 'Warehouse A', location_type: 'Storage', qr_code_hash: 'hash-warehouse-a' },
@@ -184,22 +182,15 @@ const INITIAL_STATE: DatabaseState = {
   allowed_flights: ['LH760', 'LH762', 'LX146', 'LX2646', 'OAL', 'Level 4']
 };
 
-// Ensure db directory or DB file exists
-function ensureDirAndFile() {
-  const dir = path.dirname(DB_FILE);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  if (!fs.existsSync(DB_FILE)) {
-    fs.writeFileSync(DB_FILE, JSON.stringify(INITIAL_STATE, null, 2), 'utf-8');
-  }
-}
-
-export function readDatabase(): DatabaseState {
-  ensureDirAndFile();
+export async function readDatabase(): Promise<DatabaseState> {
   try {
-    const content = fs.readFileSync(DB_FILE, 'utf-8');
-    const parsed = JSON.parse(content) as DatabaseState;
+    const docRef = doc(firestoreDb, 'appData', 'state');
+    const docSnap = await getDoc(docRef);
+    if (!docSnap.exists()) {
+      await writeDatabase(INITIAL_STATE);
+      return INITIAL_STATE;
+    }
+    const parsed = docSnap.data() as DatabaseState;
     let modified = false;
     if (!parsed.delivery_agents) {
       parsed.delivery_agents = [
@@ -215,20 +206,21 @@ export function readDatabase(): DatabaseState {
       modified = true;
     }
     if (modified) {
-      writeDatabase(parsed);
+      await writeDatabase(parsed);
     }
     return parsed;
   } catch (error) {
-    console.error('Failed reading JSON database, returning fallback state', error);
+    console.error('Failed reading from Firestore, returning fallback state', error);
     return INITIAL_STATE;
   }
 }
 
-export function writeDatabase(state: DatabaseState): void {
-  ensureDirAndFile();
+export async function writeDatabase(state: DatabaseState): Promise<void> {
   try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(state, null, 2), 'utf-8');
+    const docRef = doc(firestoreDb, 'appData', 'state');
+    await setDoc(docRef, state);
   } catch (error) {
-    console.error('Failed writing JSON database', error);
+    console.error('Failed writing to Firestore', error);
   }
 }
+

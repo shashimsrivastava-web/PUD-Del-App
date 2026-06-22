@@ -1,0 +1,18 @@
+{
+  "entities": {
+    "Document": {
+      "title": "Document",
+      "description": "A basic document.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" }
+      }
+    }
+  },
+  "firestore": {
+    "data": {
+      "schema": { "$ref": "#/entities/Document" },
+      "description": "General data."
+    }
+  }
+}

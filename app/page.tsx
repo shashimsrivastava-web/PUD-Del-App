@@ -1400,9 +1400,7 @@ export default function Home() {
         });
   });
 
-  const filteredReconciliationRows = reconciliationRows.filter(row => {
-    return filterFlight === 'all' || (row.flight_no && row.flight_no.toUpperCase().includes(filterFlight.toUpperCase()));
-  });
+  const filteredReconciliationRows = reconciliationRows;
 
   return (
     <div className="min-h-screen flex flex-col font-sans text-slate-800 bg-slate-50 pb-12">
@@ -3124,29 +3122,9 @@ export default function Home() {
                               <FileSpreadsheet className="h-4 w-4 text-red-500" />
                               Live Flight Manifest Spreadsheet Ledger ({reconciliationRows.length} Rows)
                             </span>
-                            {filterFlight !== 'all' && (
-                              <span className="text-[9px] text-amber-400 font-bold ml-6 uppercase tracking-widest">
-                                Filtering: {filterFlight} ({filteredReconciliationRows.length} displayed)
-                              </span>
-                            )}
                           </div>
                           
                           <div className="flex items-center gap-3">
-                            {/* Reconcile Tab Flight Filter */}
-                            <div className="flex items-center gap-2 mr-4">
-                              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest font-mono">Flight:</span>
-                              <select 
-                                value={filterFlight}
-                                onChange={(e) => setFilterFlight(e.target.value)}
-                                className="bg-slate-900 border border-slate-800 text-slate-300 rounded px-2 py-1 text-[10px] font-mono focus:outline-none focus:border-indigo-500 cursor-pointer"
-                              >
-                                <option value="all">all / ALL</option>
-                                {activeFlightOptions.map(f => (
-                                  <option key={f} value={f}>{f}</option>
-                                ))}
-                              </select>
-                            </div>
-
                             {selectedManifestRowIds.length > 0 && (
                               <button
                                 onClick={() => handleDeleteManifestRows(selectedManifestRowIds)}

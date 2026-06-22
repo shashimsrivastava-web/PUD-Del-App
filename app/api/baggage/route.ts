@@ -4,7 +4,7 @@ import { parseBagTag } from '@/lib/baggageParser';
 
 export async function GET(req: NextRequest) {
   try {
-    const db = readDatabase();
+    const db = await readDatabase();
     // Return non-deleted items to general queries
     const activeBaggage = db.baggage_items.filter(item => !item.is_deleted);
     return NextResponse.json({ 
@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { action } = body;
-    const db = readDatabase();
+    const db = await readDatabase();
     
     if (action === 'register_bag') {
       const { rawTag, locationId, status, agentId, dispoType, dispoValue, dispoRemarks } = body;
@@ -177,7 +177,7 @@ export async function POST(req: NextRequest) {
       };
       
       db.audit_logs.push(auditLog);
-      writeDatabase(db);
+      await writeDatabase(db);
       
       return NextResponse.json({ success: true, baggage_item: db.baggage_items.find(b => b.id === bagId) });
     }
@@ -479,8 +479,22 @@ export async function POST(req: NextRequest) {
       }
 
       const m = db.manifests[manifestIndex];
-      if (!m.rows) {
-        m.rows = [];
+      
+      // If we are editing for the first time and we only had expected_tags, hydrate m.rows
+      if (!m.rows || m.rows.length === 0) {
+        m.rows = m.expected_tags.map((tag, idx) => {
+          return {
+            id: `row-fallback-${idx}-${m.id}`,
+            pir: `PIR-${m.airline_code || 'XX'}-${88200 + idx}`,
+            passenger_name: `Passenger Box ${idx + 1}`,
+            original_tag: tag,
+            rush_tag: '',
+            flight_no: m.flight_number || '',
+            seal_no: `S-71${idx}`,
+            destination: 'FRA',
+            remarks: 'Simple tag import list'
+          };
+        });
       }
       
       const rowIndex = m.rows.findIndex(r => r.id === row.id);
@@ -489,10 +503,9 @@ export async function POST(req: NextRequest) {
         // Update existing row
         m.rows[rowIndex] = { ...m.rows[rowIndex], ...row };
       } else {
-        // Create as new row if it didn't exist (e.g. generated on the fly)
-        // If it was a generated ID, we give it a real one now if needed or just use passed ID
+        // Create as new row if it didn't exist 
         const newRow = {
-          id: row.id.startsWith('gen-') ? `row-${Date.now()}-${Math.floor(Math.random() * 1000)}` : row.id,
+          id: row.id.startsWith('gen-') || row.id.startsWith('row-fallback-') ? `row-${Date.now()}-${Math.floor(Math.random() * 1000)}` : row.id,
           pir: row.pir || '',
           passenger_name: row.passenger_name || '',
           original_tag: row.original_tag || '',
@@ -520,7 +533,7 @@ export async function POST(req: NextRequest) {
       m.expected_tags = [...new Set(newExpectedTags)];
       
       writeDatabase(db);
-      return NextResponse.json({ success: true });
+      return NextResponse.json({ success: true, manifest: m });
     }
 
     if (action === 'delete_manifest_rows') {
@@ -531,25 +544,25 @@ export async function POST(req: NextRequest) {
       }
 
       const m = db.manifests[manifestIndex];
-      const nonFallbackIds = rowIds.filter((id: string) => !id.startsWith('row-fallback-'));
-      const fallbackIds = rowIds.filter((id: string) => id.startsWith('row-fallback-'));
-      
-      let modified = false;
+      let updated = false;
 
-      // Handle fallback rows (rows without detailed structure, derived directly from expected_tags)
-      if (fallbackIds.length > 0) {
-        const indexesToRemove = fallbackIds.map((id: string) => parseInt(id.split('-')[2])).filter((n: number) => !isNaN(n));
-        if (indexesToRemove.length > 0) {
-          m.expected_tags = m.expected_tags.filter((_, idx) => !indexesToRemove.includes(idx));
-          modified = true;
+      // Handle simple tags if the id format matches row-fallback-idx-manifestId
+      if (rowIds.some((id: string) => id.startsWith('row-fallback-'))) {
+        const fallbackIndices = rowIds
+          .filter((id: string) => id.startsWith('row-fallback-'))
+          .map((id: string) => parseInt(id.split('-')[2], 10))
+          .filter((idx: number) => !isNaN(idx));
+          
+        if (fallbackIndices.length > 0) {
+          m.expected_tags = m.expected_tags.filter((_, idx) => !fallbackIndices.includes(idx));
+          updated = true;
         }
       }
 
-      // Handle properly structured rows
-      if (m.rows && m.rows.length > 0 && nonFallbackIds.length > 0) {
-        m.rows = m.rows.filter(r => !nonFallbackIds.includes(r.id));
+      if (m.rows) {
+        m.rows = m.rows.filter(r => !rowIds.includes(r.id));
         
-        // Re-sync expected_tags using remaining rows
+        // Re-sync expected_tags for detailed rows
         const newExpectedTags: string[] = [];
         m.rows.forEach(r => {
           if (r.original_tag) {
@@ -561,24 +574,16 @@ export async function POST(req: NextRequest) {
             newExpectedTags.push(p ? p.universalTag : r.rush_tag);
           }
         });
-        
-        // If we also had fallback rows in this manifest (unlikely but possible),
-        // we merge whatever was left in expected_tags. But standard operation 
-        // means if m.rows exists, expected_tags should identically match it.
-        // We'll trust the explicit rows more:
-        m.expected_tags = [...new Set([...newExpectedTags])];
-        modified = true;
-      }
-
-      if (modified) {
-        writeDatabase(db);
-        return NextResponse.json({ success: true });
-      } else if (rowIds.length > 0) {
-         // Fallback if not matching either case. It's safe to say deleted count 0
-         return NextResponse.json({ success: true, deleted: 0 });
+        m.expected_tags = [...new Set(newExpectedTags)];
+        updated = true;
       }
       
-      return NextResponse.json({ success: false, error: 'Manifest has no detailed rows or valid row structure to delete from' }, { status: 400 });
+      if (updated) {
+        writeDatabase(db);
+        return NextResponse.json({ success: true });
+      }
+      
+      return NextResponse.json({ success: false, error: 'No matching records deleted' }, { status: 400 });
     }
     
     if (action === 'batch_dispo') {
@@ -905,7 +910,7 @@ export async function POST(req: NextRequest) {
         allowed_flights: ['LH760', 'LH762', 'LX146', 'LX2646', 'OAL', 'Level 4']
       };
       
-      writeDatabase(DEFAULT_STATE_RESET);
+      await writeDatabase(DEFAULT_STATE_RESET);
       return NextResponse.json({ success: true, data: DEFAULT_STATE_RESET });
     }
     
