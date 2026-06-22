@@ -11,7 +11,7 @@ export interface BaggageItem {
   serial_number: string;
   is_deleted?: boolean;
   updated_at: string;
-  dispo_type?: 'Storage Location' | 'Delivery Agent' | 'Handover to OAL' | 'Domestic forward' | 'DID NOT ARRIVE' | '';
+  dispo_type?: 'Storage Location' | 'Delivery Agent' | 'Handover to OAL' | 'Domestic forward' | 'PICK UP BY PAX' | 'DISPOSED' | 'DID NOT ARRIVE' | '';
   dispo_value?: string;
   dispo_remarks?: string;
   pir?: string;

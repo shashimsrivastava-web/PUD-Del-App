@@ -331,6 +331,22 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, message: 'Baggage item was permanently purged from the database.' });
     }
     
+    if (action === 'purge_disposed') {
+      const { days } = body; // 0, 1, 2, 3
+      const now = new Date();
+      const cutoff = new Date(now);
+      cutoff.setDate(now.getDate() - days);
+      
+      db.baggage_items = db.baggage_items.filter(bag => {
+        if (bag.dispo_type !== 'DISPOSED') return true;
+        if (days === 0) return false;
+        return new Date(bag.updated_at) > cutoff;
+      });
+      
+      await writeDatabase(db);
+      return NextResponse.json({ success: true, message: `Purged DISPOSED baggage records older than ${days} days.` });
+    }
+    
     if (action === 'create_location') {
       const { name, type } = body;
       if (!name || (type !== 'Delivery' && type !== 'Storage')) {
@@ -746,7 +762,7 @@ export async function POST(req: NextRequest) {
           
           bag.current_location_id = finalLocId;
           bag.status = 'Batch Allocation';
-          bag.dispo_type = dType;
+          bag.dispo_type = ['Delivery Agent', 'PICK UP BY PAX', 'Domestic forward'].includes(dType as any) ? 'DISPOSED' : dType as any;
           bag.dispo_value = dValue;
           bag.updated_at = new Date().toISOString();
           

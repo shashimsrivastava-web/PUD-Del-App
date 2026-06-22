@@ -139,14 +139,15 @@ export default function Home() {
   const [isCreatingAgent, setIsCreatingAgent] = useState(false);
 
   // Baggage Dispo states (Register form)
-  const [dispoType, setDispoType] = useState<'Storage Location' | 'Delivery Agent' | 'Handover to OAL' | 'Domestic forward' | 'DID NOT ARRIVE' | ''>('');
+  const [dispoType, setDispoType] = useState<'Storage Location' | 'Delivery Agent' | 'Handover to OAL' | 'Domestic forward' | 'PICK UP BY PAX' | 'DID NOT ARRIVE' | ''>('');
   const [dispoValue, setDispoValue] = useState('');
   const [dispoRemarks, setDispoRemarks] = useState('');
 
   // Baggage Dispo states (Amend form)
-  const [amendDispoType, setAmendDispoType] = useState<'Storage Location' | 'Delivery Agent' | 'Handover to OAL' | 'Domestic forward' | 'DID NOT ARRIVE' | ''>('');
+  const [amendDispoType, setAmendDispoType] = useState<'Storage Location' | 'Delivery Agent' | 'Handover to OAL' | 'Domestic forward' | 'PICK UP BY PAX' | 'DID NOT ARRIVE' | ''>('');
   const [amendDispoValue, setAmendDispoValue] = useState('');
   const [amendDispoRemarks, setAmendDispoRemarks] = useState('');
+  const [purgeDays, setPurgeDays] = useState(0);
 
   // Amendment modal states
   const [editingBag, setEditingBag] = useState<BaggageItem | null>(null);
@@ -388,6 +389,11 @@ export default function Home() {
         triggerNotification('err', 'Data Compliance Failure: Record not found in Manifest. You must manually provide PIR, Passenger Name, Flight Number, Destination, and at least one Tag number.');
         return;
       }
+    }
+
+    if (dispoType === 'Storage Location' && dispoValue && dispoValue !== scanLocationId) {
+      triggerNotification('err', 'Conflict Detected: The assigned location slot and selected storage spot do not match. Please resolve this conflict before continuing.');
+      return;
     }
 
     try {
@@ -1190,6 +1196,25 @@ export default function Home() {
     }
   };
 
+  const handlePurgeDisposed = async () => {
+    try {
+      const response = await fetch('/api/baggage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'purge_disposed', days: purgeDays })
+      });
+      const json = await response.json();
+      if (json.success) {
+        triggerNotification('success', json.message);
+        loadData(true);
+      } else {
+        triggerNotification('err', json.error || 'Failed to purge.');
+      }
+    } catch (err) {
+      triggerNotification('err', 'Network error.');
+    }
+  };
+
   const handleBatchDispoSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!batchLocationId) {
@@ -1790,6 +1815,7 @@ export default function Home() {
                           <option value="Delivery Agent">Delivery Agent</option>
                           <option value="Handover to OAL">Handover to OAL</option>
                           <option value="Domestic forward">Domestic forward</option>
+                          <option value="PICK UP BY PAX">PICK UP BY PAX</option>
                           <option value="DID NOT ARRIVE">DID NOT ARRIVE</option>
                         </select>
                       </div>
@@ -1802,6 +1828,7 @@ export default function Home() {
                             {dispoType === 'Delivery Agent' && 'Select Agent'}
                             {dispoType === 'Handover to OAL' && 'OAL Airline Carrier'}
                             {dispoType === 'Domestic forward' && 'Domestic Forward Information'}
+                            {dispoType === 'PICK UP BY PAX' && 'Pax Details'}
                             {dispoType === 'DID NOT ARRIVE' && 'Arrival Failure Status'}
                           </label>
 
@@ -1863,6 +1890,15 @@ export default function Home() {
                               onChange={(e) => setDispoValue(e.target.value)}
                               className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-blue-500 text-slate-800 rounded-xl p-2.5 px-3 focus:outline-none text-xs font-medium font-mono"
                               placeholder="Forward details (Free text)"
+                              required
+                            />
+                          ) : dispoType === 'PICK UP BY PAX' ? (
+                            <input
+                              type="text"
+                              value={dispoValue}
+                              onChange={(e) => setDispoValue(e.target.value)}
+                              className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-blue-500 text-slate-800 rounded-xl p-2.5 px-3 focus:outline-none text-xs font-medium font-mono"
+                              placeholder="Enter pax details..."
                               required
                             />
                           ) : (
@@ -2282,6 +2318,30 @@ export default function Home() {
                         ))
                       ) : (
                         <p className="text-[11px] text-slate-400 italic">No delivery agents active in database.</p>
+                      )}
+                      
+                      {/* Purge DISPOSED Baggage (Admin Only) */}
+                      {isAdmin && (
+                        <div className="mt-8 border-t border-slate-100 pt-6">
+                          <h3 className="text-sm font-semibold text-slate-800 mb-3">Purge DISPOSED Baggage</h3>
+                          <div className="flex gap-2">
+                            <select
+                              className="bg-slate-50 border border-slate-200 text-slate-700 rounded-xl p-2.5 text-xs focus:outline-none focus:border-purple-500"
+                              onChange={(e) => setPurgeDays(Number(e.target.value))}
+                            >
+                              <option value="0">Till date (All)</option>
+                              <option value="1">Till 1 day ago</option>
+                              <option value="2">Till 2 days ago</option>
+                              <option value="3">Till 3 days ago</option>
+                            </select>
+                            <button
+                              onClick={handlePurgeDisposed}
+                              className="bg-red-600 text-white rounded-xl px-4 py-2.5 text-xs font-semibold hover:bg-red-700 transition"
+                            >
+                              Purge
+                            </button>
+                          </div>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -3525,6 +3585,7 @@ export default function Home() {
                         <option value="Delivery Agent">Delivery Agent</option>
                         <option value="Handover to OAL">Handover to OAL</option>
                         <option value="Domestic forward">Domestic forward</option>
+                        <option value="PICK UP BY PAX">PICK UP BY PAX</option>
                         <option value="DID NOT ARRIVE">DID NOT ARRIVE</option>
                       </select>
                     </div>
@@ -3537,6 +3598,7 @@ export default function Home() {
                           {amendDispoType === 'Delivery Agent' && 'Select Agent'}
                           {amendDispoType === 'Handover to OAL' && 'OAL Airline Carrier'}
                           {amendDispoType === 'Domestic forward' && 'Domestic Forward Information'}
+                          {amendDispoType === 'PICK UP BY PAX' && 'Pax Details'}
                           {amendDispoType === 'DID NOT ARRIVE' && 'Arrival Failure Status'}
                         </label>
 
@@ -3598,6 +3660,15 @@ export default function Home() {
                             onChange={(e) => setAmendDispoValue(e.target.value)}
                             className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-blue-500 text-slate-800 rounded-xl p-2.5 px-3 focus:outline-none text-xs font-medium font-mono"
                             placeholder="Forward details (Free text)"
+                            required
+                          />
+                        ) : amendDispoType === 'PICK UP BY PAX' ? (
+                          <input
+                            type="text"
+                            value={amendDispoValue}
+                            onChange={(e) => setAmendDispoValue(e.target.value)}
+                            className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-blue-500 text-slate-800 rounded-xl p-2.5 px-3 focus:outline-none text-xs font-medium font-mono"
+                            placeholder="Enter pax details..."
                             required
                           />
                         ) : (
