@@ -1,0 +1,6 @@
+{
+  "name": "RUSH BAG WIZARD",
+  "description": "Enterprise-grade baggage barcode tracking, equivalence parsing, dynamic storage location management, reason-coded audit logging, and flight manifest Excel reconciliation.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
