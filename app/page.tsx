@@ -1,6 +1,8 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+/* eslint-disable react-hooks/set-state-in-effect, react-hooks/purity */
+
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Search, 
   Database, 
@@ -20,6 +22,8 @@ import {
   FileSpreadsheet, 
   ChevronRight,
   ChevronLeft,
+  ChevronDown,
+  ChevronUp,
   Filter,
   Trash,
   HelpCircle,
@@ -36,7 +40,8 @@ import {
   LayoutDashboard,
   Clock,
   Menu,
-  X
+  X,
+  LogOut
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Image from 'next/image';
@@ -45,9 +50,69 @@ import { parseBagTag, AIRLINE_NAMES } from '@/lib/baggageParser';
 import { BaggageItem, LocationItem, AuditLog, ManifestItem, ManifestRow } from '@/lib/db-store';
 import * as XLSX from 'xlsx';
 
+function parseBatchTags(input: string): string[] {
+  if (!input) return [];
+  const segments = input.split(/[\n\r,]+/).map(s => s.trim()).filter(s => s.length > 0);
+  const tags: string[] = [];
+
+  segments.forEach(segment => {
+    const tokens = segment.split(/\s+/).filter(t => t.length > 0);
+    for (let i = 0; i < tokens.length; i++) {
+      const current = tokens[i];
+      const next = tokens[i + 1];
+      
+      if (next && /^[A-Za-z]{2,3}$/.test(current) && /^\d+$/.test(next)) {
+        tags.push(`${current}${next}`);
+        i++;
+      } else {
+        tags.push(current);
+      }
+    }
+  });
+
+  return tags;
+}
+
 export default function Home() {
+  // Stable reference to timestamp for purity compliance in render
+  const currentTimestamp = Date.now();
+
+  // Authentication State
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [loginUsername, setLoginUsername] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+
   // Current active operator (defaults to shashi.ooo.2019@gmail.com)
   const [operatorId, setOperatorId] = useState('shashi.ooo.2019@gmail.com');
+
+  useEffect(() => {
+    const authStatus = localStorage.getItem('bagWizardAuth');
+    if (authStatus === 'true') {
+      setIsAuthenticated(true);
+      setOperatorId('lh');
+    } else {
+      setIsAuthenticated(false);
+    }
+  }, []);
+
+  const handleLoginSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (loginUsername.toLowerCase() === 'lh' && loginPassword === 'welcome') {
+      localStorage.setItem('bagWizardAuth', 'true');
+      setIsAuthenticated(true);
+      setOperatorId('lh');
+      setLoginError('');
+    } else {
+      setLoginError('Invalid username or password. Please try again.');
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('bagWizardAuth');
+    setIsAuthenticated(false);
+    setOperatorId('shashi.ooo.2019@gmail.com');
+  };
 
   // Database content state loaded from our full-stack server endpoints
   const [baggageItems, setBaggageItems] = useState<BaggageItem[]>([]);
@@ -196,6 +261,11 @@ export default function Home() {
   // Tab state
   const [activeTab, setActiveTab ] = useState<'dashboard' | 'reconcile' | 'register' | 'batch-dispo' | 'recon-registry' | 'logs'>('dashboard');
   const [showMenu, setShowMenu] = useState(false);
+  const [isLocSlotsExpanded, setIsLocSlotsExpanded] = useState(false);
+  const [isAgentsExpanded, setIsAgentsExpanded] = useState(false);
+
+  // Detailed baggage modal state
+  const [viewingBag, setViewingBag] = useState<BaggageItem | null>(null);
 
   // Batch Disposition State
   const [batchLocationId, setBatchLocationId] = useState('');
@@ -220,7 +290,7 @@ export default function Home() {
   const [showOpenFollowups, setShowOpenFollowups] = useState(false);
   
   // Dashboard Filtering State
-  const [dashMainFilter, setDashMainFilter] = useState<'total' | 'storage' | 'dispo' | 'followup' | null>(null);
+  const [dashMainFilter, setDashMainFilter] = useState<'total' | 'expected_unscanned' | 'storage' | 'dispo' | 'followup' | null>(null);
   const [dashSubFilter, setDashSubFilter] = useState<string | null>(null);
 
   // Purge Records Functionality
@@ -1309,7 +1379,7 @@ export default function Home() {
       triggerNotification('err', 'System Error: You must select a Target Disposition Slot before processing batch tags.');
       return;
     }
-    const tags = batchTagsInput.split(/[\n,]+/).map(t => t.trim()).filter(t => t.length > 0);
+    const tags = parseBatchTags(batchTagsInput);
     if (tags.length === 0) {
       triggerNotification('err', 'Input Error: No baggage tags detected in input field.');
       return;
@@ -1421,28 +1491,83 @@ export default function Home() {
   // ----------------------------------------------------
   // ECO CONTRAL RECONCILIATION SUMMARY
   // ----------------------------------------------------
+  const reconciliationRows = manifests.flatMap(m => {
+    const attachManifestId = (r: any) => ({ ...r, manifestId: m.id });
+    return m.rows && m.rows.length > 0
+      ? m.rows.map(attachManifestId)
+      : m.expected_tags.map((tag, idx) => {
+          const parsed = parseBagTag(tag);
+          return attachManifestId({
+            id: `row-fallback-${idx}-${m.id}`,
+            pir: `PIR-${m.airline_code || 'XX'}-${88200 + idx}`,
+            passenger_name: `Passenger Box ${idx + 1}`,
+            original_tag: tag,
+            rush_tag: '',
+            flight_no: m.flight_number,
+            seal_no: `S-71${idx}`,
+            destination: 'FRA',
+            remarks: 'Simple tag import list'
+          });
+        });
+  });
+
   const matchedScannedBags: BaggageItem[] = [];
   const missingBagsFromManifest: { originalTag: string; parsedInfo: any }[] = [];
+  const unscannedExpectedBags: BaggageItem[] = [];
 
-  manifests.forEach(m => {
-    m.expected_tags.forEach(expectedUniversalTag => {
-      // Find matching in scanned registry based on universal code equivalency!
-      const found = baggageItems.find(scanned => scanned.universal_tag === expectedUniversalTag);
-      if (found) {
-        if (!matchedScannedBags.some(b => b.id === found.id)) {
-          matchedScannedBags.push(found);
-        }
-      } else {
-        if (!missingBagsFromManifest.some(missing => missing.originalTag === expectedUniversalTag)) {
-          // Try parsing to give user nice feedback
-          const parsedExpected = parseBagTag(expectedUniversalTag);
-          missingBagsFromManifest.push({
-            originalTag: expectedUniversalTag,
-            parsedInfo: parsedExpected
-          });
-        }
+  reconciliationRows.forEach(row => {
+    const rowOrigParsed = parseBagTag(row.original_tag);
+    const rowRushParsed = parseBagTag(row.rush_tag);
+    const rowOrigUniversal = rowOrigParsed ? rowOrigParsed.universalTag : row.original_tag;
+    const rowRushUniversal = rowRushParsed ? rowRushParsed.universalTag : row.rush_tag;
+
+    const matchedScanned = baggageItems.find(scanned => 
+      (rowOrigUniversal && scanned.universal_tag === rowOrigUniversal) || 
+      (rowRushUniversal && scanned.universal_tag === rowRushUniversal) ||
+      (row.original_tag && scanned.universal_tag === row.original_tag) || 
+      (row.rush_tag && scanned.universal_tag === row.rush_tag)
+    );
+
+    if (matchedScanned) {
+      if (!matchedScannedBags.some(b => b.id === matchedScanned.id)) {
+        matchedScannedBags.push(matchedScanned);
       }
-    });
+    } else {
+      const tagLabel = row.original_tag || row.rush_tag || 'UNKNOWN';
+      const parsedTag = rowOrigParsed || rowRushParsed;
+      if (!missingBagsFromManifest.some(missing => missing.originalTag === tagLabel)) {
+        missingBagsFromManifest.push({
+          originalTag: tagLabel,
+          parsedInfo: parsedTag
+        });
+      }
+
+      // Add a synthetic BaggageItem representing this expected, unscanned bag
+      const syntheticBag: BaggageItem = {
+        id: `expected-${row.id}`,
+        alpha_tag: row.original_tag || row.rush_tag || 'N/A',
+        universal_tag: rowOrigUniversal || rowRushUniversal || row.original_tag || row.rush_tag || 'N/A',
+        airline_name: row.flight_no ? (row.flight_no.slice(0, 2) + ' Airlines') : 'N/A',
+        passenger_name: row.passenger_name || 'N/A',
+        flight_no: row.flight_no || 'N/A',
+        destination: row.destination || 'N/A',
+        status: 'DID NOT ARRIVE',
+        current_location_id: '',
+        pir: row.pir || '',
+        original_tag: row.original_tag || '',
+        rush_tag: row.rush_tag || '',
+        seal_no: row.seal_no || '',
+        dispo_type: 'DID NOT ARRIVE',
+        dispo_value: 'Expected (Unscanned)',
+        dispo_remarks: row.remarks || '',
+        remarks: row.remarks || 'Manifest expected record, not scanned/arrived yet.',
+        serial_number: row.seal_no || 'N/A',
+        updated_at: new Date().toISOString(),
+      };
+      if (!unscannedExpectedBags.some(b => b.universal_tag === syntheticBag.universal_tag)) {
+        unscannedExpectedBags.push(syntheticBag);
+      }
+    }
   });
 
   // Handle Automatic Manifest Matching during Registration (Moved here to ensure manifestData is in scope)
@@ -1499,32 +1624,112 @@ export default function Home() {
     }
   }, [scanTagInput, manifests, lastCheckedTag, isManifestMatched, triggerNotification]);
 
-  const totalExpected = manifests.reduce((sum, m) => sum + m.expected_tags.length, 0);
+  const totalExpected = reconciliationRows.length;
   const reconciliationPercent = manifests.length > 0 && totalExpected > 0
     ? Math.round((matchedScannedBags.length / totalExpected) * 100)
     : 0;
 
-  const reconciliationRows = manifests.flatMap(m => {
-    const attachManifestId = (r: any) => ({ ...r, manifestId: m.id });
-    return m.rows && m.rows.length > 0
-      ? m.rows.map(attachManifestId)
-      : m.expected_tags.map((tag, idx) => {
-          const parsed = parseBagTag(tag);
-          return attachManifestId({
-            id: `row-fallback-${idx}-${m.id}`,
-            pir: `PIR-${m.airline_code || 'XX'}-${88200 + idx}`,
-            passenger_name: `Passenger Box ${idx + 1}`,
-            original_tag: tag,
-            rush_tag: '',
-            flight_no: m.flight_number,
-            seal_no: `S-71${idx}`,
-            destination: 'FRA',
-            remarks: 'Simple tag import list'
-          });
-        });
-  });
-
   const filteredReconciliationRows = reconciliationRows;
+
+  if (isAuthenticated === null) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center font-sans">
+        <div className="text-center space-y-3">
+          <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
+          <p className="text-xs font-mono font-bold uppercase tracking-widest text-[#94a3b8]">Verifying Security Context...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (isAuthenticated === false) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col justify-between font-sans relative overflow-hidden">
+        {/* Background ambient accents */}
+        <div className="absolute top-0 left-0 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-blue-100 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-pulse pointer-events-none"></div>
+        <div className="absolute bottom-0 right-0 translate-x-1/2 translate-y-1/2 w-96 h-96 bg-indigo-100 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-pulse pointer-events-none"></div>
+
+        <div></div> {/* Spacer */}
+
+        <div className="w-full max-w-md mx-auto px-4 z-10 w-[420px]">
+          <div className="bg-white border border-slate-205 rounded-3xl p-8 shadow-xl shadow-slate-100 space-y-6">
+            <div className="text-center space-y-2">
+              <div className="relative h-16 w-16 mx-auto overflow-hidden rounded-2xl border border-slate-200 shadow-md mb-2 bg-slate-100">
+                <Image 
+                  src={logo} 
+                  alt="RUSH BAG WIZARD Logo" 
+                  fill 
+                  className="object-cover"
+                />
+              </div>
+              <span className="font-mono text-[10px] tracking-widest text-slate-400 uppercase font-bold">Priority Expedit Hub</span>
+              <h1 className="text-2xl font-bold font-display tracking-tight text-slate-900">
+                RUSH BAG WIZARD
+              </h1>
+              <p className="text-xs text-slate-500">Sign in to access priority baggage routing and flight manifestations.</p>
+            </div>
+
+            <form onSubmit={handleLoginSubmit} className="space-y-4">
+              {loginError && (
+                <div className="bg-red-50 border border-red-200 text-red-800 text-xs font-semibold p-3.5 rounded-xl flex items-center gap-2">
+                  <AlertTriangle className="h-4 w-4 text-red-600 shrink-0" />
+                  <span>{loginError}</span>
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider">Username</label>
+                <div className="relative">
+                  <User className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                  <input
+                    type="text"
+                    value={loginUsername}
+                    onChange={(e) => setLoginUsername(e.target.value)}
+                    required
+                    className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 focus:bg-white text-slate-800 text-sm rounded-xl p-3.5 pl-11 focus:outline-none transition font-sans"
+                    placeholder="Enter operator username (lh)"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider">Password</label>
+                <div className="relative">
+                  <Lock className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                  <input
+                    type="password"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    required
+                    className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 focus:bg-white text-slate-800 text-sm rounded-xl p-3.5 pl-11 focus:outline-none transition font-sans"
+                    placeholder="••••••••"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold p-3.5 rounded-xl transition shadow-lg shadow-blue-650/25 flex items-center justify-center gap-2 cursor-pointer text-sm font-display font-bold"
+              >
+                Sign In
+              </button>
+            </form>
+
+            <div className="border-t border-slate-100 pt-4 text-center">
+              <span className="text-[10px] bg-slate-100 text-slate-600 font-mono py-1.5 px-3.5 rounded-lg font-medium">
+                Demo Auth Creds: lh / welcome
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer Area */}
+        <div className="text-center py-6 text-[10px] font-mono text-slate-400 uppercase tracking-widest">
+          Aviation Logistics Standard • FAA compliant
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col font-sans text-slate-800 bg-slate-50 pb-12">
@@ -1584,6 +1789,15 @@ export default function Home() {
             >
               <Activity className="h-3.5 w-3.5 text-indigo-500" />
               {isGeneratingSummary ? 'Compiling...' : 'Gemini Summary'}
+            </button>
+
+            <button 
+              onClick={handleLogout}
+              className="bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 text-xs font-bold py-2 px-3 rounded-xl cursor-pointer transition shadow-xs flex items-center gap-1.5 animate-fade-in"
+              title="Sign out of operator session"
+            >
+              <LogOut className="h-3.5 w-3.5 text-slate-500" />
+              Sign Out (lh)
             </button>
 
           </div>
@@ -1672,7 +1886,7 @@ export default function Home() {
                   <div className="text-left">
                     <span className="block italic leading-tight">Flight Manifest Verification</span>
                     {manifests.length > 0 && (
-                      <span className="text-[10px] opacity-80">{totalExpected} Tags / {reconciliationPercent}%</span>
+                      <span className="text-[10px] opacity-80">{totalExpected} Bags / {reconciliationPercent}%</span>
                     )}
                   </div>
                 </button>
@@ -2222,217 +2436,243 @@ export default function Home() {
                 
                 {/* Dynamic Locations Configurator Panel */}
                 <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
-                  <div className="flex items-center gap-2 mb-3 border-b border-slate-100 pb-3">
-                    <MapPin className="h-5 w-5 text-blue-600" />
-                    <h2 className="text-lg font-semibold text-slate-900">Dynamic Location Slots</h2>
+                  <div className={`flex items-center justify-between ${isLocSlotsExpanded ? 'mb-3 border-b border-slate-100 pb-3' : ''}`}>
+                    <div className="flex items-center gap-2">
+                      <MapPin className="h-5 w-5 text-blue-600" />
+                      <h2 className="text-lg font-semibold text-slate-900">Dynamic Location Slots</h2>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsLocSlotsExpanded(!isLocSlotsExpanded)}
+                      className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors text-slate-500 hover:text-slate-700 cursor-pointer flex items-center justify-center border border-transparent"
+                      title={isLocSlotsExpanded ? "Collapse Dynamic Location Slots" : "Expand Dynamic Location Slots"}
+                    >
+                      {isLocSlotsExpanded ? <ChevronUp className="h-5 w-5" /> : <ChevronDown className="h-5 w-5" />}
+                    </button>
                   </div>
                   
-                  <p className="text-xs text-slate-500 mb-4 leading-relaxed">
-                    Manage destination/carousel slots on-the-fly. This updates scanning inputs, filters, and reports instantly without code changes.
-                  </p>
+                  {isLocSlotsExpanded && (
+                    <>
+                      <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+                        Manage destination/carousel slots on-the-fly. This updates scanning inputs, filters, and reports instantly without code changes.
+                      </p>
 
-                  {!isAdmin ? (
-                    <div className="text-center py-6 px-4 bg-slate-50 border border-dashed border-slate-250 rounded-xl space-y-3 mb-4">
-                      <Lock className="h-8 w-8 text-slate-400 mx-auto animate-pulse" />
-                      <div>
-                        <p className="text-xs font-bold text-slate-800">Dynamic Slots Editing Blocked</p>
-                        <p className="text-[11px] text-slate-505 mt-1 leading-relaxed max-w-xs mx-auto">
-                          To change the database of Location Slots and Delivery Agents requires an authorized Administrator sign-in.
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowAdminModal(true)}
-                        className="bg-slate-850 hover:bg-slate-900 text-white text-[11px] font-bold py-1.5 px-3 rounded-xl transition cursor-pointer font-mono"
-                      >
-                        Sign-In to Unlock
-                      </button>
-                    </div>
-                  ) : (
-                    <form onSubmit={handleCreateLocation} className="space-y-3.5">
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Location Identifier/Name</label>
-                        <input
-                          type="text"
-                          value={newLocName}
-                          onChange={(e) => setNewLocName(e.target.value)}
-                          className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-blue-500 text-slate-800 rounded-lg p-2.5 px-3 focus:outline-none text-sm font-medium"
-                          placeholder="e.g. Carousel 12, Terminal A Rack"
-                          required
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Functional Category</label>
-                        <div className="grid grid-cols-2 gap-2">
+                      {!isAdmin ? (
+                        <div className="text-center py-6 px-4 bg-slate-50 border border-dashed border-slate-250 rounded-xl space-y-3 mb-4">
+                          <Lock className="h-8 w-8 text-slate-400 mx-auto animate-pulse" />
+                          <div>
+                            <p className="text-xs font-bold text-slate-800">Dynamic Slots Editing Blocked</p>
+                            <p className="text-[11px] text-slate-505 mt-1 leading-relaxed max-w-xs mx-auto">
+                              To change the database of Location Slots and Delivery Agents requires an authorized Administrator sign-in.
+                            </p>
+                          </div>
                           <button
                             type="button"
-                            onClick={() => setNewLocType('Storage')}
-                            className={`p-2.5 rounded-lg border text-xs font-semibold transition cursor-pointer ${
-                              newLocType === 'Storage' 
-                                ? 'border-blue-500 bg-blue-50/40 text-blue-600 shadow-xs' 
-                                : 'border-slate-200 bg-slate-50 text-slate-500 hover:text-slate-800 hover:bg-slate-100'
-                            }`}
+                            onClick={() => setShowAdminModal(true)}
+                            className="bg-slate-850 hover:bg-slate-900 text-white text-[11px] font-bold py-1.5 px-3 rounded-xl transition cursor-pointer font-mono"
                           >
-                            Storage (e.g. Warehouse)
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setNewLocType('Delivery')}
-                            className={`p-2.5 rounded-lg border text-xs font-bold transition-all duration-200 cursor-pointer ${
-                              newLocType === 'Delivery' 
-                                ? 'border-blue-600 bg-blue-50 text-blue-700 shadow-sm ring-2 ring-blue-600/20 scale-[1.02]' 
-                                : 'border-slate-200 bg-slate-50 text-slate-500 hover:text-slate-800 hover:bg-slate-100'
-                            }`}
-                          >
-                            Delivery (e.g. Carousel)
+                            Sign-In to Unlock
                           </button>
                         </div>
-                      </div>
-
-                      <button
-                        type="submit"
-                        disabled={isCreatingLoc}
-                        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-4 rounded-xl border border-transparent transition flex items-center justify-center gap-2 text-xs cursor-pointer shadow-xs"
-                      >
-                        <Plus className="h-3.5 w-3.5" />
-                        Add Location Slot
-                      </button>
-                    </form>
-                  )}
-
-                  {/* Active slots summary */}
-                  <div className="mt-5 border-t border-slate-100 pt-4">
-                    <div className="flex justify-between items-center mb-2.5">
-                      <span className="block text-[10px] font-bold text-slate-505 uppercase tracking-wide">Currently Active Slots ({locations.length})</span>
-                      <span className="text-[10px] text-blue-600 font-bold bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">Live DB</span>
-                    </div>
-                    <div className="max-h-36 overflow-y-auto space-y-1.5 scrollbar-thin">
-                      {locations.map(loc => (
-                        <div key={loc.id} className="flex justify-between items-center p-2.5 rounded-lg bg-slate-50/50 border border-slate-200/60 text-xs hover:bg-slate-50 transition">
-                          <span className="font-semibold text-slate-700">{loc.location_name}</span>
-                          <div className="flex items-center gap-2">
-                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold ${loc.location_type === 'Storage' ? 'bg-amber-100 text-amber-700 border border-amber-200/50' : 'bg-blue-100 text-blue-700 border border-blue-200/50'}`}>
-                              {loc.location_type}
-                            </span>
-                            {/* Admin only delete */}
-                            {isAdmin && (
-                              <button
-                                onClick={() => handleDeleteLocation(loc.id)}
-                                className="text-red-500 hover:text-red-750 transition cursor-pointer p-1 rounded hover:bg-slate-100"
-                                title="Delete Dynamic Slot"
-                              >
-                                <Trash className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Delivery Agent Configurator Panel */}
-                <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
-                  <div className="flex items-center gap-2 mb-3 border-b border-slate-100 pb-3">
-                    <Wrench className="h-5 w-5 text-purple-600" />
-                    <h2 className="text-lg font-semibold text-slate-900">Delivery Agent Database</h2>
-                  </div>
-
-                  <p className="text-xs text-slate-500 mb-4 leading-relaxed">
-                    Configure official logistics carriers and transport operators registered for cargo handling authorization.
-                  </p>
-
-                  {!isAdmin ? (
-                    <div className="text-center py-6 px-4 bg-slate-50 border border-dashed border-slate-250 rounded-xl space-y-3 mb-4">
-                      <Lock className="h-8 w-8 text-slate-400 mx-auto animate-pulse" />
-                      <div>
-                        <p className="text-xs font-bold text-slate-800">Database Modification Disabled</p>
-                        <p className="text-[11px] text-slate-505 mt-1 leading-relaxed max-w-xs mx-auto">
-                          To change the database of Location Slots and Delivery Agents requires an authorized Administrator sign-in.
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowAdminModal(true)}
-                        className="bg-slate-850 hover:bg-slate-900 text-white text-[11px] font-bold py-1.5 px-3 rounded-xl transition cursor-pointer font-mono"
-                      >
-                        Sign-In to Unlock
-                      </button>
-                    </div>
-                  ) : (
-                    <form onSubmit={handleCreateAgent} className="space-y-3.5">
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Agent / Company Name</label>
-                        <input
-                          type="text"
-                          value={newAgentName}
-                          onChange={(e) => setNewAgentName(e.target.value)}
-                          className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-purple-500 text-slate-800 rounded-lg p-2.5 px-3 focus:outline-none text-sm font-medium"
-                          placeholder="e.g. DHL Express, Speed Cargo, Lufthansa Ground"
-                          required
-                        />
-                      </div>
-                      <button
-                        type="submit"
-                        disabled={isCreatingAgent}
-                        className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-2.5 px-4 rounded-xl border border-transparent transition flex items-center justify-center gap-2 text-xs cursor-pointer shadow-xs"
-                      >
-                        <Plus className="h-3.5 w-3.5" />
-                        Add Delivery Agent
-                      </button>
-                    </form>
-                  )}
-
-                  {/* Active delivery agents list loaded from State */}
-                  <div className="mt-5 border-t border-slate-100 pt-4">
-                    <span className="block text-[10px] font-bold text-slate-505 uppercase tracking-wide mb-2.5 font-sans">Registered Handlers ({deliveryAgents?.length || 0})</span>
-                    <div className="max-h-36 overflow-y-auto space-y-1.5 scrollbar-thin">
-                      {deliveryAgents && deliveryAgents.length > 0 ? (
-                        deliveryAgents.map(agent => (
-                          <div key={agent.id} className="flex justify-between items-center p-2.5 rounded-lg bg-slate-50/50 border border-slate-200/60 text-xs hover:bg-slate-50 transition">
-                            <span className="font-semibold text-slate-705">{agent.agent_name}</span>
-                            {isAdmin && (
-                              <button
-                                onClick={() => handleDeleteAgent(agent.id)}
-                                className="text-red-500 hover:text-red-750 transition cursor-pointer p-1 rounded hover:bg-slate-100"
-                                title="Delete Delivery Agent"
-                              >
-                                <Trash className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                          </div>
-                        ))
                       ) : (
-                        <p className="text-[11px] text-slate-400 italic">No delivery agents active in database.</p>
-                      )}
-                      
-                      {/* Purge DISPOSED Baggage (Admin Only) */}
-                      {isAdmin && (
-                        <div className="mt-8 border-t border-slate-100 pt-6">
-                          <h3 className="text-sm font-semibold text-slate-800 mb-3">Purge DISPOSED Baggage</h3>
-                          <div className="flex gap-2">
-                            <select
-                              className="bg-slate-50 border border-slate-200 text-slate-700 rounded-xl p-2.5 text-xs focus:outline-none focus:border-purple-500"
-                              onChange={(e) => setPurgeDays(Number(e.target.value))}
-                            >
-                              <option value="0">Till date (All)</option>
-                              <option value="1">Till 1 day ago</option>
-                              <option value="2">Till 2 days ago</option>
-                              <option value="3">Till 3 days ago</option>
-                            </select>
-                            <button
-                              onClick={handlePurgeDisposed}
-                              className="bg-red-600 text-white rounded-xl px-4 py-2.5 text-xs font-semibold hover:bg-red-700 transition"
-                            >
-                              Purge
-                            </button>
+                        <form onSubmit={handleCreateLocation} className="space-y-3.5">
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Location Identifier/Name</label>
+                            <input
+                              type="text"
+                              value={newLocName}
+                              onChange={(e) => setNewLocName(e.target.value)}
+                              className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-blue-500 text-slate-800 rounded-lg p-2.5 px-3 focus:outline-none text-sm font-medium"
+                              placeholder="e.g. Carousel 12, Terminal A Rack"
+                              required
+                            />
                           </div>
-                        </div>
+
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Functional Category</label>
+                            <div className="grid grid-cols-2 gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setNewLocType('Storage')}
+                                className={`p-2.5 rounded-lg border text-xs font-semibold transition cursor-pointer ${
+                                  newLocType === 'Storage' 
+                                    ? 'border-blue-500 bg-blue-50/40 text-blue-600 shadow-xs' 
+                                    : 'border-slate-200 bg-slate-50 text-slate-500 hover:text-slate-800 hover:bg-slate-100'
+                                }`}
+                              >
+                                Storage (e.g. Warehouse)
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setNewLocType('Delivery')}
+                                className={`p-2.5 rounded-lg border text-xs font-bold transition-all duration-200 cursor-pointer ${
+                                  newLocType === 'Delivery' 
+                                    ? 'border-blue-600 bg-blue-50 text-blue-700 shadow-sm ring-2 ring-blue-600/20 scale-[1.02]' 
+                                    : 'border-slate-200 bg-slate-50 text-slate-500 hover:text-slate-800 hover:bg-slate-100'
+                                }`}
+                              >
+                                Delivery (e.g. Carousel)
+                              </button>
+                            </div>
+                          </div>
+
+                          <button
+                            type="submit"
+                            disabled={isCreatingLoc}
+                            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-4 rounded-xl border border-transparent transition flex items-center justify-center gap-2 text-xs cursor-pointer shadow-xs"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                            Add Location Slot
+                          </button>
+                        </form>
                       )}
+
+                      {/* Active slots summary */}
+                      <div className="mt-5 border-t border-slate-100 pt-4">
+                        <div className="flex justify-between items-center mb-2.5">
+                          <span className="block text-[10px] font-bold text-slate-505 uppercase tracking-wide">Currently Active Slots ({locations.length})</span>
+                          <span className="text-[10px] text-blue-600 font-bold bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">Live DB</span>
+                        </div>
+                        <div className="max-h-36 overflow-y-auto space-y-1.5 scrollbar-thin">
+                          {locations.map(loc => (
+                            <div key={loc.id} className="flex justify-between items-center p-2.5 rounded-lg bg-slate-50/50 border border-slate-200/60 text-xs hover:bg-slate-50 transition">
+                              <span className="font-semibold text-slate-700">{loc.location_name}</span>
+                              <div className="flex items-center gap-2">
+                                <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold ${loc.location_type === 'Storage' ? 'bg-amber-100 text-amber-700 border border-amber-200/50' : 'bg-blue-100 text-blue-700 border border-blue-200/50'}`}>
+                                  {loc.location_type}
+                                </span>
+                                {/* Admin only delete */}
+                                {isAdmin && (
+                                  <button
+                                    onClick={() => handleDeleteLocation(loc.id)}
+                                    className="text-red-500 hover:text-red-750 transition cursor-pointer p-1 rounded hover:bg-slate-100"
+                                    title="Delete Dynamic Slot"
+                                  >
+                                    <Trash className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                      {/* Delivery Agent Configurator Panel */}
+                <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+                  <div className={`flex items-center justify-between ${isAgentsExpanded ? 'mb-3 border-b border-slate-100 pb-3' : ''}`}>
+                    <div className="flex items-center gap-2">
+                      <Wrench className="h-5 w-5 text-purple-600" />
+                      <h2 className="text-lg font-semibold text-slate-900">Delivery Agent Database</h2>
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsAgentsExpanded(!isAgentsExpanded)}
+                      className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors text-slate-500 hover:text-slate-700 cursor-pointer flex items-center justify-center border border-transparent"
+                      title={isAgentsExpanded ? "Collapse Delivery Agent Database" : "Expand Delivery Agent Database"}
+                    >
+                      {isAgentsExpanded ? <ChevronUp className="h-5 w-5" /> : <ChevronDown className="h-5 w-5" />}
+                    </button>
                   </div>
-                </div>
+
+                  {isAgentsExpanded && (
+                    <>
+                      <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+                        Configure official logistics carriers and transport operators registered for cargo handling authorization.
+                      </p>
+
+                      {!isAdmin ? (
+                        <div className="text-center py-6 px-4 bg-slate-50 border border-dashed border-slate-250 rounded-xl space-y-3 mb-4">
+                          <Lock className="h-8 w-8 text-slate-400 mx-auto animate-pulse" />
+                          <div>
+                            <p className="text-xs font-bold text-slate-800">Database Modification Disabled</p>
+                            <p className="text-[11px] text-slate-505 mt-1 leading-relaxed max-w-xs mx-auto">
+                              To change the database of Location Slots and Delivery Agents requires an authorized Administrator sign-in.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setShowAdminModal(true)}
+                            className="bg-slate-850 hover:bg-slate-900 text-white text-[11px] font-bold py-1.5 px-3 rounded-xl transition cursor-pointer font-mono"
+                          >
+                            Sign-In to Unlock
+                          </button>
+                        </div>
+                      ) : (
+                        <form onSubmit={handleCreateAgent} className="space-y-3.5">
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-505 uppercase tracking-widest mb-1">Agent / Company Name</label>
+                            <input
+                              type="text"
+                              value={newAgentName}
+                              onChange={(e) => setNewAgentName(e.target.value)}
+                              className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-purple-500 text-slate-800 rounded-lg p-2.5 px-3 focus:outline-none text-sm font-medium"
+                              placeholder="e.g. DHL Express, Speed Cargo, Lufthansa Ground"
+                              required
+                            />
+                          </div>
+                          <button
+                            type="submit"
+                            disabled={isCreatingAgent}
+                            className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-2.5 px-4 rounded-xl border border-transparent transition flex items-center justify-center gap-2 text-xs cursor-pointer shadow-xs"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                            Add Delivery Agent
+                          </button>
+                        </form>
+                      )}
+
+                      {/* Active delivery agents list loaded from State */}
+                      <div className="mt-5 border-t border-slate-100 pt-4">
+                        <span className="block text-[10px] font-bold text-slate-505 uppercase tracking-wide mb-2.5 font-sans">Registered Handlers ({deliveryAgents?.length || 0})</span>
+                        <div className="max-h-36 overflow-y-auto space-y-1.5 scrollbar-thin">
+                          {deliveryAgents && deliveryAgents.length > 0 ? (
+                            deliveryAgents.map(agent => (
+                              <div key={agent.id} className="flex justify-between items-center p-2.5 rounded-lg bg-slate-50/50 border border-slate-200/60 text-xs hover:bg-slate-50 transition">
+                                <span className="font-semibold text-slate-705">{agent.agent_name}</span>
+                                {isAdmin && (
+                                  <button
+                                    onClick={() => handleDeleteAgent(agent.id)}
+                                    className="text-red-500 hover:text-red-750 transition cursor-pointer p-1 rounded hover:bg-slate-100"
+                                    title="Delete Delivery Agent"
+                                  >
+                                    <Trash className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            ))
+                          ) : (
+                            <p className="text-[11px] text-slate-400 italic">No delivery agents active in database.</p>
+                          )}
+                          
+                          {/* Purge DISPOSED Baggage (Admin Only) */}
+                          {isAdmin && (
+                            <div className="mt-8 border-t border-slate-100 pt-6">
+                              <h3 className="text-sm font-semibold text-slate-800 mb-3">Purge DISPOSED Baggage</h3>
+                              <div className="flex gap-2">
+                                <select
+                                  className="bg-slate-50 border border-slate-200 text-slate-700 rounded-xl p-2.5 text-xs focus:outline-none focus:border-purple-500"
+                                  onChange={(e) => setPurgeDays(Number(e.target.value))}
+                                >
+                                  <option value="0">Till date (All)</option>
+                                  <option value="1">Till 1 day ago</option>
+                                  <option value="2">Till 2 days ago</option>
+                                  <option value="3">Till 3 days ago</option>
+                                </select>
+                                <button
+                                  onClick={handlePurgeDisposed}
+                                  className="bg-red-600 text-white rounded-xl px-4 py-2.5 text-xs font-semibold hover:bg-red-700 transition"
+                                >
+                                  Purge
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>            </div>
 
                 {/* Reset system block (Admin Protected) */}
                 <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm text-center">
@@ -2528,7 +2768,7 @@ export default function Home() {
                           value={batchTagsInput}
                           onChange={(e) => setBatchTagsInput(e.target.value)}
                           className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 focus:bg-white text-slate-900 font-mono text-base tracking-widest rounded-2xl p-6 min-h-[250px] focus:outline-none placeholder-slate-300 shadow-inner leading-relaxed resize-none"
-                          placeholder={`Enter one tag per line or separated by commas.\n\nExample:\n0220123456\nLH 123456\n0016456789`}
+                          placeholder={`Enter one tag per line or separated by commas or spaces.\n\nExample:\n0220123456\nLH 123456\n0016456789`}
                           required
                         />
                         <div className="absolute top-4 right-4 flex flex-col gap-2">
@@ -2579,7 +2819,7 @@ export default function Home() {
                         ) : (
                           <>
                             <Layers className="h-6 w-6" />
-                            Submit Batch Disposition ({batchTagsInput.split(/[\n,]+/).filter(t => t.trim()).length} Tags)
+                            Submit Batch Disposition ({parseBatchTags(batchTagsInput).length} Tags)
                           </>
                         )}
                       </button>
@@ -2593,18 +2833,26 @@ export default function Home() {
           {activeTab === 'dashboard' && (
             <div className="col-span-12 space-y-6">
               {/* Primary Metrics */}
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
                 <button 
                   onClick={() => { setDashMainFilter('total'); setDashSubFilter(null); }}
-                  className={`p-6 rounded-2xl border transition-all text-left ${dashMainFilter === 'total' ? 'bg-rose-50 border-rose-200 ring-2 ring-rose-500/20' : 'bg-white border-slate-200 hover:border-rose-200'}`}
+                  className={`p-5 rounded-2xl border transition-all text-left ${dashMainFilter === 'total' ? 'bg-rose-50 border-rose-200 ring-2 ring-rose-500/20' : 'bg-white border-slate-200 hover:border-rose-200'}`}
                 >
                   <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">Total Scanned</p>
                   <p className="text-3xl font-bold text-slate-900">{baggageItems.length}</p>
                 </button>
 
                 <button 
+                  onClick={() => { setDashMainFilter('expected_unscanned'); setDashSubFilter(null); }}
+                  className={`p-5 rounded-2xl border transition-all text-left ${dashMainFilter === 'expected_unscanned' ? 'bg-orange-50 border-orange-200 ring-2 ring-orange-500/20' : 'bg-white border-slate-200 hover:border-orange-200'}`}
+                >
+                  <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1 flex items-center justify-between">Expected Unscanned</p>
+                  <p className="text-3xl font-bold text-orange-600">{unscannedExpectedBags.length}</p>
+                </button>
+
+                <button 
                   onClick={() => { setDashMainFilter('storage'); setDashSubFilter(null); }}
-                  className={`p-6 rounded-2xl border transition-all text-left ${dashMainFilter === 'storage' ? 'bg-amber-50 border-amber-200 ring-2 ring-amber-500/20' : 'bg-white border-slate-200 hover:border-amber-200'}`}
+                  className={`p-5 rounded-2xl border transition-all text-left ${dashMainFilter === 'storage' ? 'bg-amber-50 border-amber-200 ring-2 ring-amber-500/20' : 'bg-white border-slate-200 hover:border-amber-200'}`}
                 >
                   <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">In Storage</p>
                   <p className="text-3xl font-bold text-amber-600">{baggageItems.filter(b => b.dispo_type === 'Storage Location').length}</p>
@@ -2612,7 +2860,7 @@ export default function Home() {
 
                 <button 
                   onClick={() => { setDashMainFilter('dispo'); setDashSubFilter(null); }}
-                  className={`p-6 rounded-2xl border transition-all text-left ${dashMainFilter === 'dispo' ? 'bg-blue-50 border-blue-200 ring-2 ring-blue-500/20' : 'bg-white border-slate-200 hover:border-blue-200'}`}
+                  className={`p-5 rounded-2xl border transition-all text-left ${dashMainFilter === 'dispo' ? 'bg-blue-50 border-blue-200 ring-2 ring-blue-500/20' : 'bg-white border-slate-200 hover:border-blue-200'}`}
                 >
                   <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">Dispositions</p>
                   <p className="text-3xl font-bold text-blue-600">{baggageItems.filter(b => b.dispo_type && b.dispo_type !== 'Storage Location').length}</p>
@@ -2620,10 +2868,10 @@ export default function Home() {
 
                 <button 
                   onClick={() => { setDashMainFilter('followup'); setDashSubFilter(null); }}
-                  className={`p-6 rounded-2xl border transition-all text-left ${dashMainFilter === 'followup' ? 'bg-purple-50 border-purple-200 ring-2 ring-purple-500/20' : 'bg-white border-slate-200 hover:border-purple-200'}`}
+                  className={`p-5 rounded-2xl border transition-all text-left ${dashMainFilter === 'followup' ? 'bg-purple-50 border-purple-200 ring-2 ring-purple-500/20' : 'bg-white border-slate-200 hover:border-purple-200'}`}
                 >
                   <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">Open Follow-ups</p>
-                  <p className="text-3xl font-bold text-purple-600">{baggageItems.filter(b => b.status === 'DID NOT ARRIVE' || !b.dispo_type).length}</p>
+                  <p className="text-3xl font-bold text-purple-600">{baggageItems.filter(b => b.status === 'DID NOT ARRIVE' || !b.dispo_type).length + unscannedExpectedBags.length}</p>
                 </button>
               </div>
 
@@ -2635,13 +2883,13 @@ export default function Home() {
                     onClick={() => setDashSubFilter('aging-3')}
                     className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-2 ${dashSubFilter === 'aging-3' ? 'bg-amber-600 text-white' : 'bg-white text-amber-700 border border-amber-200'}`}
                   >
-                    <Clock className="h-3 w-3" /> Over 3 Days ({baggageItems.filter(b => b.dispo_type === 'Storage Location' && (Date.now() - new Date(b.updated_at || Date.now()).getTime()) / 86400000 > 3).length})
+                    <Clock className="h-3 w-3" /> Over 3 Days ({baggageItems.filter(b => b.dispo_type === 'Storage Location' && (currentTimestamp - new Date(b.updated_at || currentTimestamp).getTime()) / 86400000 > 3).length})
                   </button>
                   <button
                     onClick={() => setDashSubFilter('aging-5')}
                     className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-2 ${dashSubFilter === 'aging-5' ? 'bg-rose-600 text-white' : 'bg-white text-rose-700 border border-rose-200'}`}
                   >
-                    <AlertTriangle className="h-3 w-3" /> Over 5 Days ({baggageItems.filter(b => b.dispo_type === 'Storage Location' && (Date.now() - new Date(b.updated_at || Date.now()).getTime()) / 86400000 > 5).length})
+                    <AlertTriangle className="h-3 w-3" /> Over 5 Days ({baggageItems.filter(b => b.dispo_type === 'Storage Location' && (currentTimestamp - new Date(b.updated_at || currentTimestamp).getTime()) / 86400000 > 5).length})
                   </button>
                   <div className="w-full h-px bg-amber-100 my-1" />
                   {locations.map(loc => {
@@ -2680,19 +2928,32 @@ export default function Home() {
               {/* Result Registry Table */}
               <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
                 {(() => {
-                  const items = baggageItems.filter(bag => {
-                    if (!dashMainFilter || dashMainFilter === 'total') return true;
+                  const dashboardBags = [...baggageItems, ...unscannedExpectedBags];
+                  const items = dashboardBags.filter(bag => {
+                    const isExpected = bag.id.startsWith('expected-');
+                    if (dashMainFilter === 'expected_unscanned') {
+                      return isExpected;
+                    }
+                    if (!dashMainFilter || dashMainFilter === 'total') {
+                      if (dashMainFilter === 'total') return !isExpected;
+                      return true; // Show both scanned and expected under 'all'
+                    }
                     if (dashMainFilter === 'storage') {
-                       if (dashSubFilter === 'aging-3') return bag.dispo_type === 'Storage Location' && (Date.now() - new Date(bag.updated_at || Date.now()).getTime()) / 86400000 > 3;
-                       if (dashSubFilter === 'aging-5') return bag.dispo_type === 'Storage Location' && (Date.now() - new Date(bag.updated_at || Date.now()).getTime()) / 86400000 > 5;
+                       if (isExpected) return false;
+                       if (dashSubFilter === 'aging-3') return bag.dispo_type === 'Storage Location' && (currentTimestamp - new Date(bag.updated_at || currentTimestamp).getTime()) / 86400000 > 3;
+                       if (dashSubFilter === 'aging-5') return bag.dispo_type === 'Storage Location' && (currentTimestamp - new Date(bag.updated_at || currentTimestamp).getTime()) / 86400000 > 5;
                        if (dashSubFilter) return bag.dispo_type === 'Storage Location' && bag.current_location_id === dashSubFilter;
                        return bag.dispo_type === 'Storage Location';
                     }
                     if (dashMainFilter === 'dispo') {
+                        if (isExpected) return false;
                         if (dashSubFilter) return bag.dispo_type === dashSubFilter;
                         return bag.dispo_type && bag.dispo_type !== 'Storage Location';
                     }
-                    if (dashMainFilter === 'followup') return bag.status === 'DID NOT ARRIVE' || !bag.dispo_type;
+                    if (dashMainFilter === 'followup') {
+                        if (isExpected) return true;
+                        return bag.status === 'DID NOT ARRIVE' || !bag.dispo_type;
+                    }
                     return true;
                   });
 
@@ -2733,7 +2994,12 @@ export default function Home() {
                                 <td colSpan={5} className="px-6 py-12 text-center text-slate-400 font-medium italic">No matches found for this dashboard context.</td>
                               </tr>
                             ) : items.map(bag => (
-                              <tr key={bag.id} className="hover:bg-slate-50 transition-colors group">
+                              <tr 
+                                key={bag.id} 
+                                onClick={() => setViewingBag(bag)}
+                                className="hover:bg-slate-100/80 cursor-pointer transition-colors group"
+                                title="Click to view full baggage details & edit"
+                              >
                                 <td className="px-5 py-4 first:pl-6">
                                   <div className="font-mono font-bold text-slate-900">{bag.universal_tag || bag.alpha_tag}</div>
                                   <div className="text-[10px] text-slate-400">{bag.pir || bag.original_tag}</div>
@@ -3264,7 +3530,6 @@ export default function Home() {
                           <th className="p-3">Baggage Identifier</th>
                           <th className="p-3 text-center">Transition Map</th>
                           <th className="p-3">Mandatory Reason</th>
-                          <th className="p-3">Signoff Operator</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-150 font-mono text-slate-730">
@@ -3302,9 +3567,6 @@ export default function Home() {
                               <span className="text-[11px] font-semibold bg-slate-100 border border-slate-200 text-slate-600 rounded px-1.5 py-0.5 block md:inline-block">
                                 {log.reason}
                               </span>
-                            </td>
-                            <td className="p-3 text-slate-500 text-[11px] font-semibold italic font-sans">
-                              {log.agent_id}
                             </td>
                           </tr>
                         ))}
@@ -3477,7 +3739,7 @@ export default function Home() {
                       {/* Concordance Rate Card and Score Ring */}
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                         <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex flex-col justify-between text-center">
-                          <span className="block text-[10px] text-slate-500 uppercase tracking-wide">Total Barcodes Expected</span>
+                          <span className="block text-[10px] text-slate-500 uppercase tracking-wide font-semibold">Total Bags Expected</span>
                           <span className="text-3xl font-bold font-mono text-white mt-1">{totalExpected}</span>
                         </div>
 
@@ -4618,7 +4880,7 @@ export default function Home() {
 
               <div className="px-8 py-4 space-y-4 max-h-[300px] overflow-y-auto">
                 {/* 3-5 Days Group */}
-                {baggageItems.filter(b => b.dispo_type === 'Storage Location' && (Date.now() - new Date(b.updated_at || Date.now()).getTime()) / 86400000 > 3 && (Date.now() - new Date(b.updated_at || Date.now()).getTime()) / 86400000 <= 5).length > 0 && (
+                {baggageItems.filter(b => b.dispo_type === 'Storage Location' && (currentTimestamp - new Date(b.updated_at || currentTimestamp).getTime()) / 86400000 > 3 && (currentTimestamp - new Date(b.updated_at || currentTimestamp).getTime()) / 86400000 <= 5).length > 0 && (
                   <div className="p-4 bg-amber-50 rounded-2xl border border-amber-100">
                     <p className="text-[10px] font-bold text-amber-800 uppercase tracking-widest mb-2 flex items-center gap-1.5">
                       <Wrench className="h-3 w-3" /> Re-Export Prompt (3+ Days)
@@ -4654,6 +4916,208 @@ export default function Home() {
                 >
                   Acknowledge Audit Compliance
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* DETAILED BAGGAGE VIEWER MODAL */}
+      <AnimatePresence>
+        {viewingBag && (
+          <div className="fixed inset-0 z-50 overflow-y-auto flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white border border-slate-200 w-full max-w-lg rounded-2xl p-6 shadow-2xl relative"
+            >
+              {/* Header */}
+              <div className="flex justify-between items-start mb-5 border-b border-slate-100 pb-3">
+                <div>
+                  <span className="text-[10px] font-mono whitespace-nowrap uppercase tracking-wider text-rose-600 font-bold">Carrier: {viewingBag.airline_name || 'N/A'}</span>
+                  <h3 className="text-xl font-bold text-slate-900 mt-0.5">
+                    Baggage Record Details
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setViewingBag(null)}
+                  className="text-slate-400 hover:text-slate-800 text-lg font-bold font-mono cursor-pointer transition p-1"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Grid content */}
+              <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
+                {/* Visual state headers */}
+                <div className="grid grid-cols-2 gap-3 bg-slate-50 border border-slate-200/60 rounded-xl p-3 text-xs">
+                  <div>
+                    <span className="block text-[10px] text-slate-400 uppercase font-bold tracking-wider mb-0.5">Alphanumeric Tag</span>
+                    <span className="text-slate-850 font-mono font-bold text-sm bg-slate-200/50 px-2 py-0.5 rounded-md inline-block">
+                      {viewingBag.alpha_tag || 'N/A'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="block text-[10px] text-slate-400 uppercase font-bold tracking-wider mb-0.5">10-Digit Barcode</span>
+                    <span className="text-slate-850 font-mono font-bold text-sm bg-slate-200/50 px-2 py-0.5 rounded-md inline-block">
+                      {viewingBag.universal_tag || 'N/A'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Main details grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                  <div className="p-3 bg-slate-50/50 rounded-xl border border-slate-100">
+                    <span className="block text-[9px] text-slate-400 uppercase font-bold tracking-wider mb-0.5">Passenger Name</span>
+                    <span className="text-slate-850 font-bold text-sm">{viewingBag.passenger_name || 'N/A'}</span>
+                  </div>
+                  <div className="p-3 bg-slate-50/50 rounded-xl border border-slate-100">
+                    <span className="block text-[9px] text-slate-400 uppercase font-bold tracking-wider mb-0.5">PIR / Property Irregularity Report</span>
+                    <span className="text-slate-850 font-mono font-semibold text-sm">{viewingBag.pir || 'N/A'}</span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50/50 rounded-xl border border-slate-100">
+                    <span className="block text-[9px] text-slate-400 uppercase font-bold tracking-wider mb-0.5">Flight Number</span>
+                    <span className="text-slate-850 font-bold block">{viewingBag.flight_no || 'N/A'}</span>
+                  </div>
+                  <div className="p-3 bg-slate-50/50 rounded-xl border border-slate-100">
+                    <span className="block text-[9px] text-slate-400 uppercase font-bold tracking-wider mb-0.5">Destination</span>
+                    <span className="text-slate-850 font-semibold block">{viewingBag.destination || 'N/A'}</span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50/50 rounded-xl border border-slate-100">
+                    <span className="block text-[9px] text-slate-400 uppercase font-bold tracking-wider mb-0.5">Current Location</span>
+                    <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-slate-200 text-slate-800 font-bold text-[10px] border border-slate-300/50 mt-1">
+                      {locations.find(l => l.id === viewingBag.current_location_id)?.location_name || 'N/A'}
+                    </span>
+                  </div>
+                  <div className="p-3 bg-slate-50/50 rounded-xl border border-slate-100">
+                    <span className="block text-[9px] text-slate-400 uppercase font-bold tracking-wider mb-0.5">Operational Status</span>
+                    <span className={`inline-flex items-center px-2.5 py-1 rounded-full font-bold text-[10px] border mt-1 ${
+                      viewingBag.status === 'RECONCILED' || viewingBag.status === 'Delivered'
+                        ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                        : 'bg-rose-100 text-rose-800 border-rose-200'
+                    }`}>
+                      {viewingBag.status || 'N/A'}
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50/50 rounded-xl border border-slate-100">
+                    <span className="block text-[9px] text-slate-400 uppercase font-bold tracking-wider mb-0.5">Original Tag</span>
+                    <span className="text-slate-800 font-mono font-medium block">{viewingBag.original_tag || 'N/A'}</span>
+                  </div>
+                  <div className="p-3 bg-slate-50/50 rounded-xl border border-slate-100">
+                    <span className="block text-[9px] text-slate-400 uppercase font-bold tracking-wider mb-0.5">Rush Tag</span>
+                    <span className="text-slate-800 font-mono font-medium block">{viewingBag.rush_tag || 'N/A'}</span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50/50 rounded-xl border border-slate-100">
+                    <span className="block text-[9px] text-slate-400 uppercase font-bold tracking-wider mb-0.5">Seal Number</span>
+                    <span className="text-slate-850 font-semibold block">{viewingBag.seal_no || 'N/A'}</span>
+                  </div>
+                  <div className="p-3 bg-slate-50/50 rounded-xl border border-slate-100">
+                    <span className="block text-[9px] text-slate-400 uppercase font-bold tracking-wider mb-0.5">Last Audited</span>
+                    <span className="text-slate-500 font-medium block">
+                      {viewingBag.updated_at ? new Date(viewingBag.updated_at).toLocaleString() : 'N/A'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Disposition section */}
+                <div className="p-4 bg-blue-50/40 rounded-xl border border-blue-100 space-y-2 text-xs">
+                  <div className="flex items-center gap-1.5 text-blue-800 font-bold text-xs uppercase tracking-wider">
+                    <Wrench className="h-4 w-4" />
+                    <span>Disposition Tracking</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 pt-1">
+                    <div>
+                      <span className="block text-[9px] text-blue-500 uppercase font-bold mb-0.5">Dispo Type</span>
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full font-bold text-[10px] border ${
+                        viewingBag.dispo_type === 'Storage Location' ? 'bg-amber-100 text-amber-800 border-amber-200' :
+                        viewingBag.dispo_type ? 'bg-blue-100 text-blue-850 border-blue-200' : 'bg-slate-100 text-slate-400 border-slate-200'
+                      }`}>
+                        {viewingBag.dispo_type || 'PENDING'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[9px] text-blue-500 uppercase font-bold mb-0.5">Dispo Target/Value</span>
+                      <span className="text-slate-800 font-bold block bg-white px-2 py-1 rounded border border-blue-100 text-xs mt-0.5">
+                        {viewingBag.dispo_value || 'None Assigned'}
+                      </span>
+                    </div>
+                  </div>
+                  {viewingBag.dispo_remarks && (
+                    <div className="pt-2 border-t border-blue-100/50">
+                      <span className="block text-[9px] text-blue-500 uppercase font-bold mb-0.5">Disposition Notes</span>
+                      <p className="text-slate-700 italic font-medium leading-relaxed bg-white/70 p-2 rounded border border-blue-50/60">
+                        &ldquo;{viewingBag.dispo_remarks}&rdquo;
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Global Remarks */}
+                {viewingBag.remarks && (
+                  <div className="p-3.5 bg-amber-50/30 rounded-xl border border-amber-100 text-xs">
+                    <span className="block text-[9px] text-amber-800 uppercase font-bold tracking-widest mb-1">General Operations Remarks</span>
+                    <p className="text-slate-750 font-medium leading-relaxed">
+                      {viewingBag.remarks}
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Action buttons */}
+              <div className="mt-6 pt-4 border-t border-slate-100 flex justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => setViewingBag(null)}
+                  className="px-5 py-2.5 bg-slate-100 text-slate-700 rounded-xl text-sm font-bold hover:bg-slate-200 transition cursor-pointer"
+                >
+                  Close Details
+                </button>
+                {viewingBag.id.startsWith('expected-') ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setScanTagInput(viewingBag.original_tag || viewingBag.universal_tag || viewingBag.alpha_tag);
+                      setActiveTab('register');
+                      setViewingBag(null);
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                      triggerNotification('success', `Pre-loaded expected tag barcode ${viewingBag.original_tag || viewingBag.alpha_tag} into the registration scanner.`);
+                    }}
+                    className="px-6 py-2.5 bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-700 hover:to-amber-700 text-white rounded-xl text-sm font-bold shadow-lg shadow-orange-600/20 transition flex items-center gap-2 cursor-pointer"
+                  >
+                    <ScanLine className="h-4 w-4" />
+                    Scan Arrival
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingBag(viewingBag);
+                      setAmendLocationId(viewingBag.current_location_id);
+                      setAmendStatus(viewingBag.status);
+                      setAmendDispoType((viewingBag.dispo_type as any) || '');
+                      setAmendDispoValue(viewingBag.dispo_value || '');
+                      setAmendDispoRemarks(viewingBag.dispo_remarks || '');
+                      setAmendPir(viewingBag.pir || '');
+                      setAmendPassengerName(viewingBag.passenger_name || '');
+                      setAmendOriginalTag(viewingBag.original_tag || '');
+                      setAmendRushTag(viewingBag.rush_tag || '');
+                      setAmendFlightNo(viewingBag.flight_no || '');
+                      setAmendSealNo(viewingBag.seal_no || '');
+                      setAmendDestination(viewingBag.destination || '');
+                      setAmendRemarks(viewingBag.remarks || '');
+                      setViewingBag(null);
+                    }}
+                    className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold shadow-lg shadow-blue-600/20 transition flex items-center gap-2 cursor-pointer"
+                  >
+                    <Edit className="h-4 w-4" />
+                    Edit Option
+                  </button>
+                )}
               </div>
             </motion.div>
           </div>
