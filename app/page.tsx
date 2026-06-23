@@ -44,8 +44,6 @@ import * as XLSX from 'xlsx';
 export default function Home() {
   // Current active operator (defaults to shashi.ooo.2019@gmail.com)
   const [operatorId, setOperatorId] = useState('shashi.ooo.2019@gmail.com');
-  const [isEditingOperator, setIsEditingOperator] = useState(false);
-  const [operatorInput, setOperatorInput] = useState(operatorId);
 
   // Database content state loaded from our full-stack server endpoints
   const [baggageItems, setBaggageItems] = useState<BaggageItem[]>([]);
@@ -142,6 +140,34 @@ export default function Home() {
   const [dispoType, setDispoType] = useState<'Storage Location' | 'Delivery Agent' | 'Handover to OAL' | 'Domestic forward' | 'PICK UP BY PAX' | 'DID NOT ARRIVE' | ''>('');
   const [dispoValue, setDispoValue] = useState('');
   const [dispoRemarks, setDispoRemarks] = useState('');
+
+  const [isCompilingSummary, setIsCompilingSummary] = useState(false);
+  const [summary, setSummary] = useState('');
+  const [showSummaryModal, setShowSummaryModal] = useState(false);
+
+  const handleCompileSummary = async () => {
+    setIsCompilingSummary(true);
+    try {
+      const response = await fetch('/api/gemini-summary', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ baggageItems }),
+      });
+      const data = await response.json();
+      if (data.summary) {
+        setSummary(data.summary);
+        setShowSummaryModal(true);
+      } else {
+        triggerNotification('err', 'Failed to compile summary');
+      }
+    } catch (error) {
+      triggerNotification('err', 'Network error while compiling summary');
+    } finally {
+      setIsCompilingSummary(false);
+    }
+  };
 
   // Baggage Dispo states (Amend form)
   const [amendDispoType, setAmendDispoType] = useState<'Storage Location' | 'Delivery Agent' | 'Handover to OAL' | 'Domestic forward' | 'PICK UP BY PAX' | 'DID NOT ARRIVE' | ''>('');
@@ -1060,14 +1086,6 @@ export default function Home() {
     });
   };
 
-  // Update operator identity handler
-  const saveOperator = () => {
-    if (operatorInput.trim()) {
-      setOperatorId(operatorInput.trim());
-      setIsEditingOperator(false);
-      triggerNotification('success', `Operator identity changed to: ${operatorInput.trim()}`);
-    }
-  };
 
   // Pre-load barcode testing button generators
   const runSimulatedScan = (tag: string, locationId: string, status: string = 'Scanned') => {
@@ -1464,6 +1482,13 @@ export default function Home() {
 
           {/* Compliance Logged User (Operator ID & Admin Context) */}
           <div className="flex flex-wrap items-center gap-3 self-start md:self-auto">
+            <button
+               onClick={handleCompileSummary}
+               className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold py-2 px-3 rounded-xl cursor-pointer transition shadow-xs flex items-center gap-1.5"
+               disabled={isCompilingSummary}
+            >
+              {isCompilingSummary ? 'Compiling...' : 'Compile Summary'}
+            </button>
             {/* Admin status toggle */}
             {isAdmin ? (
               <div className="flex items-center gap-2 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl p-2 px-3 text-xs font-semibold shadow-xs">
@@ -1489,42 +1514,7 @@ export default function Home() {
               </button>
             )}
 
-            <div className="flex items-center gap-3 bg-slate-50 border border-slate-200 rounded-xl p-2 px-3 shadow-xs">
-              <User className="h-4 w-4 text-slate-500" />
-              <div className="text-left font-mono">
-                <span className="block text-[10px] text-slate-500 uppercase tracking-wider font-bold">Active Scrutineer</span>
-                {isEditingOperator ? (
-                  <div className="flex items-center gap-1 mt-0.5">
-                    <input
-                      type="email"
-                      value={operatorInput}
-                      onChange={(e) => setOperatorInput(e.target.value)}
-                      className="bg-white font-mono text-xs border border-blue-500 rounded px-1.5 py-0.5 text-slate-900 w-48 focus:outline-none"
-                      placeholder="operator@aviation.com"
-                    />
-                    <button 
-                      onClick={saveOperator}
-                      className="bg-blue-600 hover:bg-blue-700 text-white text-xs py-0.5 px-2 font-bold rounded shadow-xs"
-                    >
-                      Save
-                    </button>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-slate-800 font-semibold">{operatorId}</span>
-                    <button
-                      onClick={() => {
-                        setOperatorInput(operatorId);
-                        setIsEditingOperator(true);
-                      }}
-                      className="text-[10px] text-blue-600 hover:underline hover:text-blue-700 font-bold"
-                    >
-                      Change
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
+
           </div>
         </div>
       </header>
@@ -4218,6 +4208,31 @@ export default function Home() {
           </div>
         )}
       </AnimatePresence>
+        {/* Summary Modal */}
+        <AnimatePresence>
+          {showSummaryModal && (
+            <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center z-[110] p-4">
+              <motion.div 
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-xl"
+              >
+                <h2 className="text-xl font-bold text-slate-800 mb-4">Gemini Baggage Summary</h2>
+                <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl text-sm text-slate-700 whitespace-pre-line font-mono mb-6 max-h-[60vh] overflow-y-auto">
+                  {summary}
+                </div>
+                <button 
+                  onClick={() => setShowSummaryModal(false)}
+                  className="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-2.5 rounded-xl transition"
+                >
+                  Close
+                </button>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
       <datalist id="manifest-flights-list">
         {activeFlightOptions.map(flight => (
           <option key={flight} value={flight} />
