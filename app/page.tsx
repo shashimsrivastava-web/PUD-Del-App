@@ -103,6 +103,11 @@ export default function Home() {
   const [adminPassword, setAdminPassword] = useState('');
   const [adminError, setAdminError] = useState<string | null>(null);
 
+  // Gemini Summary state
+  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+  const [showSummaryModal, setShowSummaryModal] = useState(false);
+  const [summaryResult, setSummaryResult] = useState<string | null>(null);
+
   // Flight filter state
   const [allowedFlights, setAllowedFlights] = useState<string[]>([]);
   const [newFlightsInput, setNewFlightsInput] = useState('');
@@ -140,34 +145,6 @@ export default function Home() {
   const [dispoType, setDispoType] = useState<'Storage Location' | 'Delivery Agent' | 'Handover to OAL' | 'Domestic forward' | 'PICK UP BY PAX' | 'DID NOT ARRIVE' | ''>('');
   const [dispoValue, setDispoValue] = useState('');
   const [dispoRemarks, setDispoRemarks] = useState('');
-
-  const [isCompilingSummary, setIsCompilingSummary] = useState(false);
-  const [summary, setSummary] = useState('');
-  const [showSummaryModal, setShowSummaryModal] = useState(false);
-
-  const handleCompileSummary = async () => {
-    setIsCompilingSummary(true);
-    try {
-      const response = await fetch('/api/gemini-summary', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ baggageItems }),
-      });
-      const data = await response.json();
-      if (data.summary) {
-        setSummary(data.summary);
-        setShowSummaryModal(true);
-      } else {
-        triggerNotification('err', 'Failed to compile summary');
-      }
-    } catch (error) {
-      triggerNotification('err', 'Network error while compiling summary');
-    } finally {
-      setIsCompilingSummary(false);
-    }
-  };
 
   // Baggage Dispo states (Amend form)
   const [amendDispoType, setAmendDispoType] = useState<'Storage Location' | 'Delivery Agent' | 'Handover to OAL' | 'Domestic forward' | 'PICK UP BY PAX' | 'DID NOT ARRIVE' | ''>('');
@@ -600,6 +577,29 @@ export default function Home() {
   const handleAdminSignout = () => {
     setIsAdmin(false);
     triggerNotification('success', 'Logged out from System Administrator mode.');
+  };
+
+  const handleGenerateGeminiSummary = async () => {
+    setIsGeneratingSummary(true);
+    setShowSummaryModal(true);
+    setSummaryResult(null);
+    try {
+      const response = await fetch('/api/summary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baggageItems, locations: locationItems })
+      });
+      if (!response.ok) {
+        throw new Error('Failed to generate summary');
+      }
+      const data = await response.json();
+      setSummaryResult(data.text);
+    } catch (err: any) {
+      console.error(err);
+      setSummaryResult('Error computing summary via Gemini.');
+    } finally {
+      setIsGeneratingSummary(false);
+    }
   };
 
   const handleAdminSignIn = (e: React.FormEvent) => {
@@ -1482,13 +1482,6 @@ export default function Home() {
 
           {/* Compliance Logged User (Operator ID & Admin Context) */}
           <div className="flex flex-wrap items-center gap-3 self-start md:self-auto">
-            <button
-               onClick={handleCompileSummary}
-               className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold py-2 px-3 rounded-xl cursor-pointer transition shadow-xs flex items-center gap-1.5"
-               disabled={isCompilingSummary}
-            >
-              {isCompilingSummary ? 'Compiling...' : 'Compile Summary'}
-            </button>
             {/* Admin status toggle */}
             {isAdmin ? (
               <div className="flex items-center gap-2 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl p-2 px-3 text-xs font-semibold shadow-xs">
@@ -1513,7 +1506,15 @@ export default function Home() {
                 Admin Sign-In
               </button>
             )}
-
+            
+            <button 
+              onClick={handleGenerateGeminiSummary}
+              className="bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-xs font-bold py-2 px-3 rounded-xl cursor-pointer transition shadow-xs flex items-center gap-1.5"
+              disabled={isGeneratingSummary}
+            >
+              <Activity className="h-3.5 w-3.5 text-indigo-500" />
+              {isGeneratingSummary ? 'Compiling...' : 'Gemini Summary'}
+            </button>
 
           </div>
         </div>
@@ -4208,30 +4209,63 @@ export default function Home() {
           </div>
         )}
       </AnimatePresence>
-        {/* Summary Modal */}
-        <AnimatePresence>
-          {showSummaryModal && (
-            <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center z-[110] p-4">
-              <motion.div 
-                initial={{ scale: 0.95, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.95, opacity: 0 }}
-                className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-xl"
+      {/* GEMINI SUMMARY MODAL */}
+      <AnimatePresence>
+        {showSummaryModal && (
+          <div className="fixed inset-0 z-50 overflow-y-auto flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white border border-slate-200 w-full max-w-lg rounded-2xl p-6 shadow-2xl relative space-y-4"
+            >
+              <button 
+                onClick={() => setShowSummaryModal(false)}
+                className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 transition"
               >
-                <h2 className="text-xl font-bold text-slate-800 mb-4">Gemini Baggage Summary</h2>
-                <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl text-sm text-slate-700 whitespace-pre-line font-mono mb-6 max-h-[60vh] overflow-y-auto">
-                  {summary}
+                <XCircle className="h-5 w-5" />
+              </button>
+
+              <div className="flex items-start gap-4 border-b border-slate-100 pb-3">
+                <div className="p-2.5 bg-indigo-50 border border-indigo-200/60 rounded-xl text-indigo-600">
+                  <Activity className="h-5 w-5" />
                 </div>
-                <button 
+                <div>
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500 font-bold">
+                    AI Analysis
+                  </span>
+                  <h3 className="text-sm font-bold text-slate-900 mt-0.5">
+                    Gemini Intelligence Summary
+                  </h3>
+                </div>
+              </div>
+
+              <div className="text-sm text-slate-700 min-h-[150px] font-mono whitespace-pre-wrap bg-slate-50 p-4 rounded-xl border border-slate-200">
+                {isGeneratingSummary ? (
+                  <div className="flex items-center gap-2 text-indigo-600 animate-pulse">
+                    <Activity className="h-4 w-4" />
+                    <span>Compiling latest statistics...</span>
+                  </div>
+                ) : summaryResult ? (
+                  summaryResult
+                ) : (
+                  'No summary available.'
+                )}
+              </div>
+
+              <div className="flex justify-end pt-2 border-t border-slate-100">
+                <button
+                  type="button"
                   onClick={() => setShowSummaryModal(false)}
-                  className="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-2.5 rounded-xl transition"
+                  className="bg-slate-100 text-slate-600 font-bold text-xs py-2 px-4 rounded-xl transition hover:bg-slate-200 border border-slate-200 cursor-pointer"
                 >
                   Close
                 </button>
-              </motion.div>
-            </div>
-          )}
-        </AnimatePresence>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       <datalist id="manifest-flights-list">
         {activeFlightOptions.map(flight => (
