@@ -32,7 +32,11 @@ import {
   Wrench,
   Settings,
   Check,
-  FileDown
+  FileDown,
+  LayoutDashboard,
+  Clock,
+  Menu,
+  X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Image from 'next/image';
@@ -190,7 +194,8 @@ export default function Home() {
   });
 
   // Tab state
-  const [activeTab, setActiveTab ] = useState<'reconcile' | 'register' | 'batch-dispo' | 'search' | 'logs'>('reconcile');
+  const [activeTab, setActiveTab ] = useState<'dashboard' | 'reconcile' | 'register' | 'batch-dispo' | 'recon-registry' | 'logs'>('dashboard');
+  const [showMenu, setShowMenu] = useState(false);
 
   // Batch Disposition State
   const [batchLocationId, setBatchLocationId] = useState('');
@@ -208,6 +213,71 @@ export default function Home() {
   // Manifest Match State for Registration
   const [isManifestMatched, setIsManifestMatched] = useState(false);
   const [lastCheckedTag, setLastCheckedTag] = useState('');
+
+  // Reconciliation Filters
+  const [reconLocationFilter, setReconLocationFilter] = useState('all');
+  const [reconDispoFilter, setReconDispoFilter] = useState('all');
+  const [showOpenFollowups, setShowOpenFollowups] = useState(false);
+  
+  // Dashboard Filtering State
+  const [dashMainFilter, setDashMainFilter] = useState<'total' | 'storage' | 'dispo' | 'followup' | null>(null);
+  const [dashSubFilter, setDashSubFilter] = useState<string | null>(null);
+
+  // Purge Records Functionality
+  const handlePurgeDashboardRecords = async (itemsToPurge: any[]) => {
+    if (!isAdmin) {
+      triggerNotification('err', 'Admin sign-in required for database purge operations.');
+      return;
+    }
+
+    if (itemsToPurge.length === 0) {
+      triggerNotification('err', 'No records match the current filter for purging.');
+      return;
+    }
+
+    const confirmed = window.confirm(`DANGER: You are about to PERMANENTLY PURGE ${itemsToPurge.length} records logic from the database. This action is irreversible. Proceed?`);
+    if (!confirmed) return;
+
+    try {
+      const response = await fetch('/api/baggage/purge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: itemsToPurge.map(i => i.id) })
+      });
+
+      if (response.ok) {
+        triggerNotification('success', `${itemsToPurge.length} records purged and archived.`);
+        // Refresh items after deletion (usually handled by listener, but manual trigger helps)
+        setBaggageItems(prev => prev.filter(b => !itemsToPurge.map(i => i.id).includes(b.id)));
+      } else {
+        const err = await response.json();
+        triggerNotification('err', err.error || 'Purge operation failed.');
+      }
+    } catch (error) {
+      triggerNotification('err', 'System error during purge registry operation.');
+    }
+  };
+
+  // Aging Notifications
+  const [showAgingNotification, setShowAgingNotification] = useState(false);
+  const [urgentAgingBags, setUrgentAgingBags] = useState<any[]>([]);
+
+  // Check for aging bags on app load
+  useEffect(() => {
+      const storageBags = baggageItems.filter(b => b.dispo_type === 'Storage Location');
+      const aged = storageBags.filter(b => {
+        const bagDate = new Date(b.updated_at || Date.now());
+        const days = (Date.now() - bagDate.getTime()) / (1000 * 60 * 60 * 24);
+        return days > 3;
+      });
+      if (aged.length > 0) setShowAgingNotification(true);
+      const urgent = storageBags.filter(b => {
+        const bagDate = new Date(b.updated_at || Date.now());
+        const days = (Date.now() - bagDate.getTime()) / (1000 * 60 * 60 * 24);
+        return days > 5;
+      });
+      setUrgentAgingBags(urgent);
+  }, [baggageItems]);
 
   // Camera scanner states
   const [isScanning, setIsScanning] = useState(false);
@@ -388,8 +458,8 @@ export default function Home() {
 
     // Strict Enforcement logic if not matched
     if (!isManifestMatched) {
-      if (!scanPir.trim() || !scanPassengerName.trim() || !scanFlightNo.trim() || !scanDestination.trim() || (!scanOriginalTag.trim() && !scanRushTag.trim())) {
-        triggerNotification('err', 'Data Compliance Failure: Record not found in Manifest. You must manually provide PIR, Passenger Name, Flight Number, Destination, and at least one Tag number.');
+      if (!scanPir.trim() && !scanPassengerName.trim() && !scanFlightNo.trim() && !scanDestination.trim() && !scanOriginalTag.trim() && !scanRushTag.trim()) {
+        triggerNotification('err', 'Data Compliance Failure: Record not found in Manifest. You must manually provide at least one field (PIR, Passenger Name, Flight Number, Destination, or Tag number).');
         return;
       }
     }
@@ -587,7 +657,7 @@ export default function Home() {
       const response = await fetch('/api/summary', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baggageItems, locations: locationItems })
+        body: JSON.stringify({ baggageItems, locations: locations })
       });
       if (!response.ok) {
         throw new Error('Failed to generate summary');
@@ -1547,81 +1617,119 @@ export default function Home() {
       </AnimatePresence>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6 flex-grow w-full">
-        {/* Navigation Tabs */}
-        <div className="flex border border-slate-200 bg-white/90 backdrop-blur rounded-2xl p-2 gap-1 overflow-x-auto pb-2 md:pb-2 shadow-sm">
+        {/* Menu Toggle Button */}
+        <div className="flex items-center gap-3 mb-4">
           <button
-            onClick={() => setActiveTab('reconcile')}
-            className={`py-2.5 px-4 font-display font-medium text-sm transition duration-150 shrink-0 flex items-center gap-2 rounded-xl cursor-pointer ${
-              activeTab === 'reconcile' 
-                ? 'bg-blue-600 text-white font-semibold shadow-xs' 
-                : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+            onClick={() => setShowMenu(!showMenu)}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm transition duration-200 shadow-sm border ${
+              showMenu 
+                ? 'bg-slate-900 text-white border-slate-900' 
+                : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300'
             }`}
           >
-            <FileSpreadsheet className="h-4 w-4" />
-            Flight Manifest Verification
-            {manifests.length > 0 && (
-              <span className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${
-                activeTab === 'reconcile' 
-                  ? 'bg-blue-700 text-white' 
-                  : reconciliationPercent === 100 
-                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' 
-                  : 'bg-amber-100 text-amber-800'
-              }`}>
-                {totalExpected} Tags / {reconciliationPercent}%
-              </span>
-            )}
+            {showMenu ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
+            {showMenu ? 'Hide Menu' : 'Show Menu'}
           </button>
-          <button
-            onClick={() => setActiveTab('register')}
-            className={`py-2.5 px-4 font-display font-medium text-sm transition duration-150 shrink-0 flex items-center gap-2 rounded-xl cursor-pointer ${
-              activeTab === 'register' 
-                ? 'bg-blue-600 text-white font-semibold shadow-xs' 
-                : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
-            }`}
-          >
-            <ScanLine className="h-4 w-4" />
-            Tag Scanner & Registry Manual
-          </button>
-          <button
-            onClick={() => setActiveTab('batch-dispo')}
-            className={`py-2.5 px-4 font-display font-medium text-sm transition duration-150 shrink-0 flex items-center gap-2 rounded-xl cursor-pointer ${
-              activeTab === 'batch-dispo' 
-                ? 'bg-blue-600 text-white font-semibold shadow-xs' 
-                : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
-            }`}
-          >
-            <Layers className="h-4 w-4" />
-            Batch Dispo
-          </button>
-          <button
-            onClick={() => setActiveTab('search')}
-            className={`py-2.5 px-4 font-display font-medium text-sm transition duration-150 shrink-0 flex items-center gap-2 rounded-xl cursor-pointer ${
-              activeTab === 'search' 
-                ? 'bg-blue-600 text-white font-semibold shadow-xs' 
-                : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
-            }`}
-          >
-            <Search className="h-4 w-4" />
-            Reconciliation Registry Search
-            <span className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${activeTab === 'search' ? 'bg-blue-700 text-white' : 'bg-slate-100 text-slate-600 border border-slate-200'}`}>
-              {filteredBaggage.length}
-            </span>
-          </button>
-          <button
-            onClick={() => setActiveTab('logs')}
-            className={`py-2.5 px-4 font-display font-medium text-sm transition duration-150 shrink-0 flex items-center gap-2 rounded-xl cursor-pointer ${
-              activeTab === 'logs' 
-                ? 'bg-blue-600 text-white font-semibold shadow-xs' 
-                : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
-            }`}
-          >
-            <Activity className="h-4 w-4" />
-            Aviation Audit Logs
-            <span className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${activeTab === 'logs' ? 'bg-blue-700 text-white' : 'bg-slate-100 text-slate-600 border border-slate-200'}`}>
-              {auditLogs.length}
-            </span>
-          </button>
+          {!showMenu && (
+             <div className="hidden sm:flex items-center gap-2 text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+               <span className="w-1 h-1 bg-slate-300 rounded-full" />
+               Current View: {activeTab.toUpperCase()}
+             </div>
+          )}
         </div>
+
+        {/* Collapsible Navigation Tabs */}
+        <AnimatePresence>
+          {showMenu && (
+            <motion.div 
+              initial={{ opacity: 0, height: 0, y: -10 }}
+              animate={{ opacity: 1, height: 'auto', y: 0 }}
+              exit={{ opacity: 0, height: 0, y: -10 }}
+              transition={{ duration: 0.3, ease: [0.23, 1, 0.32, 1] }}
+              className="overflow-hidden mb-6"
+            >
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 bg-slate-100/50 backdrop-blur p-2 rounded-2xl border border-slate-200 shadow-inner">
+                <button
+                  onClick={() => { setActiveTab('dashboard'); setShowMenu(false); }}
+                  className={`py-3 px-4 font-display font-bold text-sm transition duration-150 flex items-center gap-3 rounded-xl cursor-pointer ${
+                    activeTab === 'dashboard' 
+                      ? 'bg-rose-600 text-white shadow-lg shadow-rose-600/20' 
+                      : 'bg-white text-rose-700 border border-rose-100 hover:bg-rose-50'
+                  }`}
+                >
+                  <LayoutDashboard className="h-4 w-4" />
+                  Dashboard
+                </button>
+                <button
+                  onClick={() => { setActiveTab('reconcile'); setShowMenu(false); }}
+                  className={`py-3 px-4 font-display font-bold text-sm transition duration-150 flex items-center gap-3 rounded-xl cursor-pointer ${
+                    activeTab === 'reconcile' 
+                      ? 'bg-amber-600 text-white shadow-lg shadow-amber-600/20' 
+                      : 'bg-white text-amber-700 border border-amber-100 hover:bg-amber-50'
+                  }`}
+                >
+                  <FileSpreadsheet className="h-4 w-4" />
+                  <div className="text-left">
+                    <span className="block italic leading-tight">Flight Manifest Verification</span>
+                    {manifests.length > 0 && (
+                      <span className="text-[10px] opacity-80">{totalExpected} Tags / {reconciliationPercent}%</span>
+                    )}
+                  </div>
+                </button>
+                <button
+                  onClick={() => { setActiveTab('register'); setShowMenu(false); }}
+                  className={`py-3 px-4 font-display font-bold text-sm transition duration-150 flex items-center gap-3 rounded-xl cursor-pointer ${
+                    activeTab === 'register' 
+                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' 
+                      : 'bg-white text-blue-700 border border-blue-100 hover:bg-blue-50'
+                  }`}
+                >
+                  <ScanLine className="h-4 w-4" />
+                  Tag Scanner & Registry Manual
+                </button>
+                <button
+                  onClick={() => { setActiveTab('batch-dispo'); setShowMenu(false); }}
+                  className={`py-3 px-4 font-display font-bold text-sm transition duration-150 flex items-center gap-3 rounded-xl cursor-pointer ${
+                    activeTab === 'batch-dispo' 
+                      ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/20' 
+                      : 'bg-white text-purple-700 border border-purple-100 hover:bg-purple-50'
+                  }`}
+                >
+                  <Layers className="h-4 w-4" />
+                  Batch Dispo
+                </button>
+                <button
+                  onClick={() => { setActiveTab('recon-registry'); setShowMenu(false); }}
+                  className={`py-3 px-4 font-display font-bold text-sm transition duration-150 flex items-center gap-3 rounded-xl cursor-pointer ${
+                    activeTab === 'recon-registry' 
+                      ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-600/20' 
+                      : 'bg-white text-cyan-700 border border-cyan-100 hover:bg-cyan-50'
+                  }`}
+                >
+                  <Search className="h-4 w-4" />
+                  <div className="text-left">
+                    <span className="block italic leading-tight">Reconciliation Registry</span>
+                    <span className="text-[10px] opacity-80">{filteredBaggage.length} items logged</span>
+                  </div>
+                </button>
+                <button
+                  onClick={() => { setActiveTab('logs'); setShowMenu(false); }}
+                  className={`py-3 px-4 font-display font-bold text-sm transition duration-150 flex items-center gap-3 rounded-xl cursor-pointer ${
+                    activeTab === 'logs' 
+                      ? 'bg-slate-600 text-white shadow-lg shadow-slate-600/20' 
+                      : 'bg-white text-slate-700 border border-slate-100 hover:bg-slate-50'
+                  }`}
+                >
+                  <Activity className="h-4 w-4" />
+                  <div className="text-left">
+                    <span className="block italic leading-tight">Aviation Audit Logs</span>
+                    <span className="text-[10px] opacity-80">{auditLogs.length} events recorded</span>
+                  </div>
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Tab Content Panels */}
         <div className="mt-6 md:grid md:grid-cols-12 md:gap-6">
@@ -1946,63 +2054,54 @@ export default function Home() {
                       <div>
                         <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1 flex justify-between">
                           <span>PIR Number</span>
-                          {!isManifestMatched && <span className="text-rose-500 font-bold">*</span>}
                         </label>
                         <input
                           type="text"
                           value={scanPir}
                           onChange={(e) => setScanPir(e.target.value)}
                           placeholder="e.g. PIR-LH-88201"
-                          required={!isManifestMatched}
-                          className={`w-full bg-white border ${!isManifestMatched && !scanPir ? 'border-rose-300' : 'border-slate-250'} rounded-lg p-2 focus:outline-none focus:border-blue-500 font-mono text-xs transition`}
+                          className={`w-full bg-white border border-slate-250 rounded-lg p-2 focus:outline-none focus:border-blue-500 font-mono text-xs transition`}
                         />
                       </div>
                       <div>
                         <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1 flex justify-between">
                           <span>Passenger Name</span>
-                          {!isManifestMatched && <span className="text-rose-500 font-bold">*</span>}
                         </label>
                         <input
                           type="text"
                           value={scanPassengerName}
                           onChange={(e) => setScanPassengerName(e.target.value)}
                           placeholder="Passenger Name"
-                          required={!isManifestMatched}
-                          className={`w-full bg-white border ${!isManifestMatched && !scanPassengerName ? 'border-rose-300' : 'border-slate-250'} rounded-lg p-2 focus:outline-none focus:border-blue-500 text-xs transition`}
+                          className={`w-full bg-white border border-slate-250 rounded-lg p-2 focus:outline-none focus:border-blue-500 text-xs transition`}
                         />
                       </div>
                       <div>
                         <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1 flex justify-between">
                           <span>Original Tag No</span>
-                          {!isManifestMatched && <span className="text-rose-500 font-bold">*</span>}
                         </label>
                         <input
                           type="text"
                           value={scanOriginalTag}
                           onChange={(e) => setScanOriginalTag(e.target.value)}
                           placeholder="e.g. 0220123456"
-                          required={!isManifestMatched && !scanRushTag}
-                          className={`w-full bg-white border ${!isManifestMatched && !scanOriginalTag && !scanRushTag ? 'border-rose-300' : 'border-slate-250'} rounded-lg p-2 focus:outline-none focus:border-blue-500 font-mono text-xs transition`}
+                          className={`w-full bg-white border border-slate-250 rounded-lg p-2 focus:outline-none focus:border-blue-500 font-mono text-xs transition`}
                         />
                       </div>
                       <div>
                         <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1 flex justify-between">
                           <span>Rush Tag No</span>
-                          {!isManifestMatched && <span className="text-rose-500 font-bold">*</span>}
                         </label>
                         <input
                           type="text"
                           value={scanRushTag}
                           onChange={(e) => setScanRushTag(e.target.value)}
                           placeholder="e.g. LH 900501"
-                          required={!isManifestMatched && !scanOriginalTag}
-                          className={`w-full bg-white border ${!isManifestMatched && !scanRushTag && !scanOriginalTag ? 'border-rose-300' : 'border-slate-250'} rounded-lg p-2 focus:outline-none focus:border-blue-500 font-mono text-xs transition`}
+                          className={`w-full bg-white border border-slate-250 rounded-lg p-2 focus:outline-none focus:border-blue-500 font-mono text-xs transition`}
                         />
                       </div>
                       <div>
                         <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1 flex justify-between">
                           <span>Flight Number</span>
-                          {!isManifestMatched && <span className="text-rose-500 font-bold">*</span>}
                         </label>
                         <input
                           type="text"
@@ -2010,22 +2109,19 @@ export default function Home() {
                           onChange={(e) => setScanFlightNo(e.target.value)}
                           placeholder="e.g. Flight No"
                           list="manifest-flights-list"
-                          required={!isManifestMatched}
-                          className={`w-full bg-white border ${!isManifestMatched && !scanFlightNo ? 'border-rose-300' : 'border-slate-250'} rounded-lg p-2 focus:outline-none focus:border-blue-500 font-mono text-xs transition`}
+                          className={`w-full bg-white border border-slate-250 rounded-lg p-2 focus:outline-none focus:border-blue-500 font-mono text-xs transition`}
                         />
                       </div>
                       <div>
                         <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1 flex justify-between">
                           <span>Destination</span>
-                          {!isManifestMatched && <span className="text-rose-500 font-bold">*</span>}
                         </label>
                         <input
                           type="text"
                           value={scanDestination}
                           onChange={(e) => setScanDestination(e.target.value)}
                           placeholder="e.g. FRA"
-                          required={!isManifestMatched}
-                          className={`w-full bg-white border ${!isManifestMatched && !scanDestination ? 'border-rose-300' : 'border-slate-250'} rounded-lg p-2 focus:outline-none focus:border-blue-500 text-xs transition`}
+                          className={`w-full bg-white border border-slate-250 rounded-lg p-2 focus:outline-none focus:border-blue-500 text-xs transition`}
                         />
                       </div>
                       <div>
@@ -2494,8 +2590,189 @@ export default function Home() {
             </div>
           )}
 
+          {activeTab === 'dashboard' && (
+            <div className="col-span-12 space-y-6">
+              {/* Primary Metrics */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <button 
+                  onClick={() => { setDashMainFilter('total'); setDashSubFilter(null); }}
+                  className={`p-6 rounded-2xl border transition-all text-left ${dashMainFilter === 'total' ? 'bg-rose-50 border-rose-200 ring-2 ring-rose-500/20' : 'bg-white border-slate-200 hover:border-rose-200'}`}
+                >
+                  <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">Total Scanned</p>
+                  <p className="text-3xl font-bold text-slate-900">{baggageItems.length}</p>
+                </button>
+
+                <button 
+                  onClick={() => { setDashMainFilter('storage'); setDashSubFilter(null); }}
+                  className={`p-6 rounded-2xl border transition-all text-left ${dashMainFilter === 'storage' ? 'bg-amber-50 border-amber-200 ring-2 ring-amber-500/20' : 'bg-white border-slate-200 hover:border-amber-200'}`}
+                >
+                  <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">In Storage</p>
+                  <p className="text-3xl font-bold text-amber-600">{baggageItems.filter(b => b.dispo_type === 'Storage Location').length}</p>
+                </button>
+
+                <button 
+                  onClick={() => { setDashMainFilter('dispo'); setDashSubFilter(null); }}
+                  className={`p-6 rounded-2xl border transition-all text-left ${dashMainFilter === 'dispo' ? 'bg-blue-50 border-blue-200 ring-2 ring-blue-500/20' : 'bg-white border-slate-200 hover:border-blue-200'}`}
+                >
+                  <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">Dispositions</p>
+                  <p className="text-3xl font-bold text-blue-600">{baggageItems.filter(b => b.dispo_type && b.dispo_type !== 'Storage Location').length}</p>
+                </button>
+
+                <button 
+                  onClick={() => { setDashMainFilter('followup'); setDashSubFilter(null); }}
+                  className={`p-6 rounded-2xl border transition-all text-left ${dashMainFilter === 'followup' ? 'bg-purple-50 border-purple-200 ring-2 ring-purple-500/20' : 'bg-white border-slate-200 hover:border-purple-200'}`}
+                >
+                  <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">Open Follow-ups</p>
+                  <p className="text-3xl font-bold text-purple-600">{baggageItems.filter(b => b.status === 'DID NOT ARRIVE' || !b.dispo_type).length}</p>
+                </button>
+              </div>
+
+              {/* Sub-breakdown Buttons */}
+              {dashMainFilter === 'storage' && (
+                <div className="flex flex-wrap gap-2 p-4 bg-amber-50/50 rounded-xl border border-amber-100">
+                  <span className="text-[10px] font-bold text-amber-800 uppercase flex-none w-full mb-1">Aging & Location Breakdown:</span>
+                  <button
+                    onClick={() => setDashSubFilter('aging-3')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-2 ${dashSubFilter === 'aging-3' ? 'bg-amber-600 text-white' : 'bg-white text-amber-700 border border-amber-200'}`}
+                  >
+                    <Clock className="h-3 w-3" /> Over 3 Days ({baggageItems.filter(b => b.dispo_type === 'Storage Location' && (Date.now() - new Date(b.updated_at || Date.now()).getTime()) / 86400000 > 3).length})
+                  </button>
+                  <button
+                    onClick={() => setDashSubFilter('aging-5')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-2 ${dashSubFilter === 'aging-5' ? 'bg-rose-600 text-white' : 'bg-white text-rose-700 border border-rose-200'}`}
+                  >
+                    <AlertTriangle className="h-3 w-3" /> Over 5 Days ({baggageItems.filter(b => b.dispo_type === 'Storage Location' && (Date.now() - new Date(b.updated_at || Date.now()).getTime()) / 86400000 > 5).length})
+                  </button>
+                  <div className="w-full h-px bg-amber-100 my-1" />
+                  {locations.map(loc => {
+                    const count = baggageItems.filter(b => b.dispo_type === 'Storage Location' && b.current_location_id === loc.id).length;
+                    return (
+                      <button
+                        key={loc.id}
+                        onClick={() => setDashSubFilter(loc.id)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${dashSubFilter === loc.id ? 'bg-amber-600 text-white' : 'bg-white text-amber-700 border border-amber-200 shadow-sm hover:bg-amber-50'}`}
+                      >
+                        {loc.location_name} ({count})
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {dashMainFilter === 'dispo' && (
+                <div className="flex flex-wrap gap-2 p-4 bg-blue-50/50 rounded-xl border border-blue-100">
+                  <span className="text-[10px] font-bold text-blue-800 uppercase flex-none w-full mb-1">Breakdown by type:</span>
+                  {['Delivery Agent', 'Handover to OAL', 'Domestic forward', 'PICK UP BY PAX', 'Re-Export to HDQ'].map(type => {
+                    const count = baggageItems.filter(b => b.dispo_type === type).length;
+                    return (
+                      <button
+                        key={type}
+                        onClick={() => setDashSubFilter(type)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${dashSubFilter === type ? 'bg-blue-600 text-white' : 'bg-white text-blue-700 border border-blue-200 shadow-sm hover:bg-blue-50'}`}
+                      >
+                        {type} ({count})
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Result Registry Table */}
+              <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
+                {(() => {
+                  const items = baggageItems.filter(bag => {
+                    if (!dashMainFilter || dashMainFilter === 'total') return true;
+                    if (dashMainFilter === 'storage') {
+                       if (dashSubFilter === 'aging-3') return bag.dispo_type === 'Storage Location' && (Date.now() - new Date(bag.updated_at || Date.now()).getTime()) / 86400000 > 3;
+                       if (dashSubFilter === 'aging-5') return bag.dispo_type === 'Storage Location' && (Date.now() - new Date(bag.updated_at || Date.now()).getTime()) / 86400000 > 5;
+                       if (dashSubFilter) return bag.dispo_type === 'Storage Location' && bag.current_location_id === dashSubFilter;
+                       return bag.dispo_type === 'Storage Location';
+                    }
+                    if (dashMainFilter === 'dispo') {
+                        if (dashSubFilter) return bag.dispo_type === dashSubFilter;
+                        return bag.dispo_type && bag.dispo_type !== 'Storage Location';
+                    }
+                    if (dashMainFilter === 'followup') return bag.status === 'DID NOT ARRIVE' || !bag.dispo_type;
+                    return true;
+                  });
+
+                  return (
+                    <>
+                      <div className="px-5 py-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                        <h3 className="font-semibold text-slate-900 text-sm">
+                          {dashMainFilter ? dashMainFilter.toUpperCase() : 'ALL RECORDS'} 
+                          {dashSubFilter && ` : ${dashSubFilter.startsWith('aging') ? dashSubFilter.toUpperCase().replace('-', ' ') : 'LOCATION ID ' + dashSubFilter}`}
+                        </h3>
+                        <div className="flex items-center gap-3">
+                          <span className="text-xs text-slate-500 font-medium">{items.length} records matched</span>
+                          {isAdmin && items.length > 0 && (
+                            <button 
+                              onClick={() => handlePurgeDashboardRecords(items)}
+                              className="px-3 py-1 text-[10px] bg-rose-50 text-rose-600 border border-rose-200 rounded-lg hover:bg-rose-100 transition font-bold uppercase tracking-wider flex items-center gap-1.5"
+                            >
+                              <Database className="h-3 w-3" /> Purge Records
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-xs border-collapse">
+                          <thead>
+                            <tr className="bg-slate-100/50 text-slate-500 font-bold border-b border-slate-100">
+                              <th className="px-5 py-3 first:pl-6">Tag / PIR</th>
+                              <th className="px-5 py-3">Passenger</th>
+                              <th className="px-5 py-3">Location</th>
+                              <th className="px-5 py-3">Disposition</th>
+                              <th className="px-5 py-3 text-right pr-6">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {items.length === 0 ? (
+                              <tr>
+                                <td colSpan={5} className="px-6 py-12 text-center text-slate-400 font-medium italic">No matches found for this dashboard context.</td>
+                              </tr>
+                            ) : items.map(bag => (
+                              <tr key={bag.id} className="hover:bg-slate-50 transition-colors group">
+                                <td className="px-5 py-4 first:pl-6">
+                                  <div className="font-mono font-bold text-slate-900">{bag.universal_tag || bag.alpha_tag}</div>
+                                  <div className="text-[10px] text-slate-400">{bag.pir || bag.original_tag}</div>
+                                </td>
+                                <td className="px-5 py-4 text-slate-600 font-medium">{bag.passenger_name}</td>
+                                <td className="px-5 py-4">
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 font-medium text-[10px] border border-slate-200">
+                                    {locations.find(l => l.id === bag.current_location_id)?.location_name || 'N/A'}
+                                  </span>
+                                </td>
+                                <td className="px-5 py-4">
+                                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full font-bold text-[10px] border ${
+                                    bag.dispo_type === 'Storage Location' ? 'bg-amber-100 text-amber-800 border-amber-200' :
+                                    bag.dispo_type ? 'bg-blue-100 text-blue-800 border-blue-200' : 'bg-slate-100 text-slate-400 border-slate-200'
+                                  }`}>
+                                    {bag.dispo_type || 'PENDING'}
+                                  </span>
+                                </td>
+                                <td className="px-5 py-4 text-right pr-6">
+                                  <span className={`px-2 py-1 rounded font-bold text-[9px] uppercase tracking-tighter ${
+                                    bag.status === 'RECONCILED' ? 'bg-emerald-500 text-white' : 'bg-rose-500 text-white'
+                                  }`}>
+                                    {bag.status}
+                                  </span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
+
           {/* TAB 2: ADVANCED SEARCH & RECONCILIATION SEARCH */}
-          {activeTab === 'search' && (
+          {activeTab === 'recon-registry' && (
             <div className="col-span-12 space-y-6">
               
               {/* Filter Panel */}
@@ -2740,19 +3017,72 @@ export default function Home() {
               )}
 
               {/* Major Baggage items registry result */}
+              {(() => {
+                  const reconFilteredBaggage = baggageItems.filter(bag => {
+                    const matchesLocation = reconLocationFilter === 'all' || bag.current_location_id === reconLocationFilter;
+                    const matchesDispo = reconDispoFilter === 'all' || bag.dispo_type === reconDispoFilter;
+                    if (showOpenFollowups) {
+                      return (bag.status === 'DID NOT ARRIVE' || bag.dispo_type === 'Storage Location') && matchesLocation && matchesDispo;
+                    }
+                    return matchesLocation && matchesDispo;
+                  });
+              return (
               <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
                 <div className="p-5 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
                   <h3 className="font-semibold text-slate-900 text-base">Reconciliation Baggage Records</h3>
                   <span className="text-xs bg-blue-50 text-blue-700 border border-blue-100 rounded-full px-2.5 py-1 font-mono font-bold">
-                    Showing {filteredBaggage.length} of {baggageItems.length} scanned bags
+                    Showing {reconFilteredBaggage.length} of {baggageItems.length} scanned bags
                   </span>
                 </div>
+                
+                {/* Filter controls */}
+                <div className="p-4 border-b border-slate-100">
+                  <div className="flex items-center gap-2 text-xs">
+                    <select
+                      value={reconLocationFilter}
+                      onChange={(e) => setReconLocationFilter(e.target.value)}
+                      className="border border-slate-200 rounded-lg p-1.5 focus:outline-none"
+                    >
+                      <option value="all">All Locations</option>
+                      {locations.map(l => (
+                        <option key={l.id} value={l.id}>{l.location_name}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={reconDispoFilter}
+                      onChange={(e) => setReconDispoFilter(e.target.value)}
+                      className="border border-slate-200 rounded-lg p-1.5 focus:outline-none"
+                    >
+                      <option value="all">All Disposition</option>
+                      <option value="Delivery Agent">Delivery Agent</option>
+                      <option value="Handover to OAL">Handover to OAL</option>
+                      <option value="Domestic forward">Domestic forward</option>
+                      <option value="PICK UP BY PAX">PICK UP BY PAX</option>
+                      <option value="Re-Export to HDQ">Re-Export to HDQ</option>
+                      <option value="Storage Location">Storage Location</option>
+                    </select>
+                    <button
+                      onClick={() => setShowOpenFollowups(!showOpenFollowups)}
+                      className={`px-3 py-1.5 rounded-lg border text-xs font-bold transition ${showOpenFollowups ? 'bg-amber-100 border-amber-300 text-amber-800' : 'bg-slate-50 border-slate-200 text-slate-600'}`}
+                    >
+                      {showOpenFollowups ? 'Show All' : 'Open Follow-ups'}
+                    </button>
+                  </div>
+                </div>
 
-                {filteredBaggage.length === 0 ? (
+                {/* Statistics Summary */}
+                <div className="p-4 border-b border-slate-100 bg-slate-50 grid grid-cols-4 gap-4 text-xs text-slate-700">
+                  <div>Delivery Agents: <span className="font-bold">{reconFilteredBaggage.filter(b => b.dispo_type === 'Delivery Agent').length}</span></div>
+                  <div>Handover OAL: <span className="font-bold">{reconFilteredBaggage.filter(b => b.dispo_type === 'Handover to OAL').length}</span></div>
+                  <div>Domestic Forward: <span className="font-bold">{reconFilteredBaggage.filter(b => b.dispo_type === 'Domestic forward').length}</span></div>
+                  <div>Pax Pickup: <span className="font-bold">{reconFilteredBaggage.filter(b => b.dispo_type === 'PICK UP BY PAX').length}</span></div>
+                </div>
+
+                {reconFilteredBaggage.length === 0 ? (
                   <div className="p-12 text-center text-slate-500 space-y-3">
                     <Database className="h-12 w-12 text-slate-400 mx-auto" />
                     <p className="text-slate-600 font-bold font-display">No registered bags found matching search criteria.</p>
-                    <p className="text-xs max-w-sm mx-auto text-slate-400">Try clearing search filters or Scan a mock barcode tag under the Registration form.</p>
+                    <p className="text-xs max-w-sm mx-auto text-slate-400">Try clearing search filters.</p>
                   </div>
                 ) : (
                   <div className="overflow-x-auto">
@@ -2767,7 +3097,7 @@ export default function Home() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100/80">
-                        {filteredBaggage.map((bag) => {
+                        {reconFilteredBaggage.map((bag) => {
                           const associatedLoc = locations.find(l => l.id === bag.current_location_id);
                           
                           return (
@@ -2899,6 +3229,8 @@ export default function Home() {
                   </div>
                 )}
               </div>
+              );
+              })()}
             </div>
           )}
 
@@ -4260,6 +4592,67 @@ export default function Home() {
                   className="bg-slate-100 text-slate-600 font-bold text-xs py-2 px-4 rounded-xl transition hover:bg-slate-200 border border-slate-200 cursor-pointer"
                 >
                   Close
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* AGING NOTIFICATION MODAL */}
+      <AnimatePresence>
+        {showAgingNotification && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-md">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 40 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              className="bg-white rounded-[32px] shadow-2xl w-full max-w-lg overflow-hidden border-2 border-amber-200 relative"
+            >
+              <div className="p-8 pb-4 text-center">
+                <div className="mx-auto w-16 h-16 bg-amber-100 rounded-3xl flex items-center justify-center mb-6 ring-4 ring-amber-50">
+                  <Clock className="h-8 w-8 text-amber-600" />
+                </div>
+                <h2 className="text-2xl font-bold text-slate-900 mb-2 text-center">Registry Aging Detected</h2>
+                <p className="text-slate-500 text-sm">Automated audit has identified bags in storage exceeding compliance aging thresholds.</p>
+              </div>
+
+              <div className="px-8 py-4 space-y-4 max-h-[300px] overflow-y-auto">
+                {/* 3-5 Days Group */}
+                {baggageItems.filter(b => b.dispo_type === 'Storage Location' && (Date.now() - new Date(b.updated_at || Date.now()).getTime()) / 86400000 > 3 && (Date.now() - new Date(b.updated_at || Date.now()).getTime()) / 86400000 <= 5).length > 0 && (
+                  <div className="p-4 bg-amber-50 rounded-2xl border border-amber-100">
+                    <p className="text-[10px] font-bold text-amber-800 uppercase tracking-widest mb-2 flex items-center gap-1.5">
+                      <Wrench className="h-3 w-3" /> Re-Export Prompt (3+ Days)
+                    </p>
+                    <p className="text-xs text-amber-900 font-medium leading-relaxed">
+                      Please initiate <strong>Re-Export to HDQ</strong> for bags in storage over 3 days. Open new Dispo for these entries.
+                    </p>
+                  </div>
+                )}
+
+                {/* 5+ Days Urgent Group */}
+                {urgentAgingBags.length > 0 && (
+                  <div className="p-4 bg-rose-50 rounded-2xl border border-rose-200 shadow-sm">
+                    <p className="text-[10px] font-bold text-rose-800 uppercase tracking-widest mb-2 flex items-center gap-1.5">
+                      <AlertTriangle className="h-3 w-3" /> Urgent Alert (5+ Days)
+                    </p>
+                    <div className="space-y-2">
+                       {urgentAgingBags.map(bag => (
+                         <div key={bag.id} className="flex items-center justify-between bg-white/60 p-2 rounded-lg border border-rose-100">
+                           <span className="text-[10px] font-mono font-bold text-rose-900">{bag.universal_tag || bag.alpha_tag || bag.id}</span>
+                           <span className="text-[10px] text-rose-700 font-bold">ACK REQUIRED</span>
+                         </div>
+                       ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="p-8 pt-4">
+                <button 
+                  onClick={() => setShowAgingNotification(false)}
+                  className="w-full py-4 bg-slate-900 text-white rounded-2xl font-bold text-sm hover:bg-slate-800 transition shadow-lg shadow-slate-900/20"
+                >
+                  Acknowledge Audit Compliance
                 </button>
               </div>
             </motion.div>
